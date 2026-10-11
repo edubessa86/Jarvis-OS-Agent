@@ -263,7 +263,28 @@ class RagEngine:
         chunks = []
         current = []
         current_len = 0
+
+        def split_huge_block(block, max_len):
+            if len(block) <= max_len:
+                return [block]
+            lines = block.split("\n")
+            result = []
+            for line in lines:
+                if len(line) <= max_len:
+                    result.append(line)
+                else:
+                    for i in range(0, len(line), max_len):
+                        result.append(line[i:i+max_len])
+            return result
+
+        safe_paragraphs = []
         for p in paragraphs:
+            if len(p) > chunk_size:
+                safe_paragraphs.extend(split_huge_block(p, chunk_size))
+            else:
+                safe_paragraphs.append(p)
+
+        for p in safe_paragraphs:
             p_len = len(p) + 2
             if current_len + p_len > chunk_size and current:
                 chunks.append("\n\n".join(current))
@@ -279,9 +300,11 @@ class RagEngine:
                 current_len = overlap_len
             current.append(p)
             current_len += p_len
+            
         if current:
             chunks.append("\n\n".join(current))
-        return chunks if chunks else [text]
+            
+        return chunks if chunks else [text[:chunk_size]]
 
     def _get_file_hash(self, file_path):
         hasher = hashlib.md5()
@@ -631,13 +654,13 @@ class RagEngine:
                         query_embeddings=[query_embedding],
                         n_results=top_k * 2,
                         where=where_clause,
-                        include=["documents", "metadatas", "distances", "ids"]
+                        include=["documents", "metadatas", "distances"]
                     )
                 else:
                     vector_results = self.rag_collection.query(
                         query_embeddings=[query_embedding],
                         n_results=top_k * 2,
-                        include=["documents", "metadatas", "distances", "ids"]
+                        include=["documents", "metadatas", "distances"]
                     )
 
             vector_items = []
