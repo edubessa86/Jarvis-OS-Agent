@@ -8,8 +8,8 @@ class JarvisFileEditor:
         self.workspace = workspace_dir or os.getcwd()
         self.MAX_FILE_SIZE = 1024 * 1024
         self.MAX_CREATE_MANY_FILES = 10
-        self.MAX_REPO_MAP_DEPTH = 4
-        self.MAX_REPO_MAP_FILES = 50
+        self.MAX_REPO_MAP_DEPTH = 6
+        self.MAX_REPO_MAP_FILES = 200
         self.MAX_VIEW_CHARS = 15000
         logger.debug(f"FileEditor initialized with workspace: {self.workspace}")
 
@@ -41,45 +41,105 @@ class JarvisFileEditor:
         half = max_chars // 2
         return (f"{text[:half]}\n[... TRUNCATED: {len(text) - max_chars} chars ...]\n{text[-half:]}")
 
-    def get_repo_map(self, file_path=None, max_files=50, max_depth=4):
+    def get_repo_map(self, file_path=None, max_files=None, max_depth=None):
         logger.info(f"📁 Generating repo map for path: {file_path or self.workspace}")
+        max_files = max_files or self.MAX_REPO_MAP_FILES
+        max_depth = max_depth or self.MAX_REPO_MAP_DEPTH
         try:
             target_path = file_path if file_path else self.workspace
             if not os.path.exists(target_path):
                 logger.error(f"Path does not exist: {target_path}")
                 return f"[ERROR] Path '{target_path}' does not exist. Please provide a valid absolute path."
+            if not os.path.isdir(target_path):
+                logger.error(f"Path is not a directory: {target_path}")
+                return f"[ERROR] '{target_path}' is a file, not a folder. Please provide a valid directory path."
             tree_lines = [f"Project Architecture (Root: {target_path}):"]
             tree_lines.append(f"Max Depth: {max_depth}, Max Files: {max_files}")
             tree_lines.append("")
             count = 0
-            skipped_dirs = [".venv", "node_modules", "__pycache__", ".git", "Data", "venv", "env", ".idea", ".vscode", "dist", "build", "target"]
-            skip_extensions = [".pyc", ".pyo", ".so", ".dll", ".exe", ".class", ".jar", ".war", ".ear", ".log", ".tmp", ".cache", ".DS_Store"]
-            include_extensions = [".py", ".json", ".md", ".txt", ".html", ".js", ".css", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".sh", ".bat", ".ps1", ".xml", ".svg"]
-            for root, dirs, files in os.walk(target_path):
-                rel_path = os.path.relpath(root, target_path)
-                depth = 0 if rel_path == '.' else rel_path.count(os.sep) + 1
+            skipped_dirs = [
+                ".venv", "venv", "env", ".env", "ENV", "virtualenv",
+                "node_modules", "bower_components", "jspm_packages",
+                "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+                ".git", ".svn", ".hg", ".bzr",
+                ".idea", ".vscode", ".vs", ".settings", ".metadata",
+                "dist", "build", "target", "out", "bin", "obj", "release", "debug",
+                ".next", ".nuxt", ".svelte-kit", ".angular", ".parcel-cache", ".turbo",
+                "coverage", ".coverage", "htmlcov", ".nyc_output",
+                ".cache", ".npm", ".yarn", ".pnpm-store", ".gradle", ".m2",
+                "eggs", ".eggs", "wheels",
+                "logs", "log", "tmp", "temp", ".tmp", ".temp",
+                "site-packages", "lib64", "include", "share",
+                "Pods", "Carthage", "DerivedData",
+                ".terraform", ".serverless", ".aws-sam",
+                "vendor", "Godeps",
+                ".history", ".sass-cache", ".eslintcache", ".stylelintcache"
+            ]
+            skip_extensions = [
+                ".pyc", ".pyo", ".pyd", ".pyw",
+                ".so", ".dll", ".dylib", ".a", ".lib", ".o", ".obj",
+                ".exe", ".msi", ".app", ".dmg", ".deb", ".rpm", ".apk", ".ipa",
+                ".class", ".jar", ".war", ".ear", ".aar",
+                ".log", ".logs", ".tmp", ".temp", ".cache", ".bak", ".backup", ".old", ".orig",
+                ".lock", ".lockfile",
+                ".swp", ".swo", ".swn", ".swx",
+                ".pid", ".sock", ".seed",
+                ".map",
+                ".woff", ".woff2", ".ttf", ".eot", ".otf",
+                ".ico", ".icns",
+                ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".wav", ".flac", ".webm",
+                ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz",
+                ".iso", ".img", ".bin", ".dat", ".db", ".sqlite", ".sqlite3",
+                ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                ".psd", ".ai", ".sketch", ".fig", ".xd",
+                ".blend", ".fbx", ".obj3d", ".stl", ".gltf", ".glb",
+                ".wasm", ".bc", ".ll",
+                ".nupkg", ".snupkg", ".vsix",
+                ".pdb", ".ilk", ".exp",
+                ".rlib", ".rmeta", ".d",
+                ".prof", ".gcda", ".gcno",
+                ".heapsnapshot", ".cpuprofile",
+                ".dmp", ".crash",
+                ".lnk", ".url",
+                ".nib", ".xib", ".storyboardc",
+                ".pyc.orig", ".rej"
+            ]
+            blocked_filenames = {
+                ".DS_Store", "Thumbs.db", "desktop.ini",
+                ".env", ".env.local", ".env.production", ".env.development",
+                ".pid.lock", ".npmrc.lock"
+            }
+
+            def walk_error(err):
+                logger.warning(f"Cannot access: {err.filename} - {err.strerror}")
+
+            for root, dirs, files in os.walk(target_path, onerror=walk_error, followlinks=False):
+                rel_root = os.path.relpath(root, target_path)
+                depth = 0 if rel_root == '.' else rel_root.count(os.sep) + 1
                 if depth > max_depth:
                     dirs.clear()
                     continue
-                dirs[:] = [d for d in dirs if d not in skipped_dirs]
+                dirs[:] = [d for d in dirs if d not in skipped_dirs and not d.endswith(".egg-info")]
+                dirs.sort()
+                files.sort()
                 for file in files:
+                    if file in blocked_filenames:
+                        continue
                     try:
                         file_path_full = os.path.join(root, file)
                         if os.path.getsize(file_path_full) > self.MAX_FILE_SIZE:
                             continue
-                    except:
-                        pass
+                    except (OSError, FileNotFoundError):
+                        continue
                     ext = os.path.splitext(file)[1].lower()
                     if ext in skip_extensions:
                         continue
-                    if not any(file.endswith(ext) for ext in include_extensions):
-                        continue
-                    rel_path = os.path.relpath(os.path.join(root, file), target_path)
-                    clean_path = rel_path.replace("\\", "/")
+                    rel_file = os.path.relpath(os.path.join(root, file), target_path)
+                    clean_path = rel_file.replace("\\", "/")
                     tree_lines.append(f"  - {clean_path}")
                     count += 1
                     if count >= max_files:
-                        tree_lines.append("  ... (truncated remaining files)")
+                        tree_lines.append(f"  ... (TRUNCATED: showing first {max_files} files. Increase max_files to see more.)")
                         logger.info(f"Repo map generated with {count} files (truncated)")
                         return "\n".join(tree_lines)
             tree_lines.append("")
@@ -199,7 +259,7 @@ class JarvisFileEditor:
                 if file_size > self.MAX_FILE_SIZE and (start_line is None and end_line is None):
                     logger.warning(f"File {file_path} is large ({file_size} bytes), suggest using line range.")
                     return f"[WARNING] File '{file_path}' is {file_size} bytes (max {self.MAX_FILE_SIZE}). Use line range to view partial content."
-            except:
+            except (OSError, FileNotFoundError):
                 pass
 
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
