@@ -20,6 +20,11 @@ from deepgram import DeepgramClient, LiveTranscriptionEvents, LiveOptions
 load_dotenv()
 SetLogLevel(-1)
 
+AZURE_SPEECH_KEY = "fake_key_for_ondevice"
+AZURE_SPEECH_REGION = "eastasia"
+AZURE_KEYWORD_MODEL_PATH = "Data/model/azure/jarvis.table"
+AZURE_TTS_VOICE = "hi-IN-MadhurNeural"
+
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 
 if not DEEPGRAM_API_KEY:
@@ -116,6 +121,14 @@ class UnifiedVoiceAssistant:
         self.RATE = 16000
         self.CHUNK = 480
 
+        self.use_azure_wake = False
+        self.azure_speechsdk = None
+        self.azure_speech_config = None
+        self.azure_keyword_model = None
+        self.azure_recognizer = None
+        self.azure_push_stream = None
+        self.azure_wake_detected = threading.Event()
+
         try:
             self.vad = webrtcvad.Vad(2)
             self.MAX_SILENCE_TIMEOUT = 1.0
@@ -128,15 +141,7 @@ class UnifiedVoiceAssistant:
                 "two", "three", "alpha", "beta", "noise", "background", "something"
             ]
 
-            model_path = VOSK_MODEL_PATH
-            if not os.path.exists(model_path):
-                logger.warning(f"Vosk model not found at '{model_path}'. Auto-downloading...")
-                download_vosk_model()
-
-            self.vosk_model = VoskModel(model_path)
-
-            grammar = json.dumps(self.WAKE_WORDS + self.DECOY_WORDS + ["[unk]"])
-            self.vosk_recognizer = KaldiRecognizer(self.vosk_model, self.RATE, grammar)
+            self._init_wake_engine()
 
             self.audio = pyaudio.PyAudio()
             self.stream = self.audio.open(
@@ -161,6 +166,86 @@ class UnifiedVoiceAssistant:
             self.mic_available = False
             logger.warning(f"Microphone not available — voice input DISABLED. Reason: {e}")
 
+    def _init_wake_engine(self):
+        if os.path.exists(AZURE_KEYWORD_MODEL_PATH):
+            try:
+                import azure.cognitiveservices.speech as speechsdk
+                self.azure_speechsdk = speechsdk
+                self.azure_speech_config = speechsdk.SpeechConfig(
+                    subscription=AZURE_SPEECH_KEY,
+                    region=AZURE_SPEECH_REGION
+                )
+                self.azure_keyword_model = speechsdk.KeywordRecognitionModel(AZURE_KEYWORD_MODEL_PATH)
+                self.use_azure_wake = True
+                logger.info(f"✅ Azure wake word engine ENABLED | model={AZURE_KEYWORD_MODEL_PATH}")
+                return
+            except Exception as e:
+                logger.warning(f"⚠️ Azure wake word init failed: {e}. Falling back to Vosk.")
+                self.use_azure_wake = False
+
+        if not os.path.exists(VOSK_MODEL_PATH):
+            logger.warning(f"Vosk model not found at '{VOSK_MODEL_PATH}'. Auto-downloading...")
+            download_vosk_model()
+
+        self.vosk_model = VoskModel(VOSK_MODEL_PATH)
+        grammar = json.dumps(self.WAKE_WORDS + self.DECOY_WORDS + ["[unk]"])
+        self.vosk_recognizer = KaldiRecognizer(self.vosk_model, self.RATE, grammar)
+        logger.info("✅ Vosk wake word engine ENABLED (fallback)")
+
+    def _start_azure_listening(self):
+        if not self.use_azure_wake or self.azure_speechsdk is None:
+            return
+        try:
+            audio_format = self.azure_speechsdk.audio.AudioStreamFormat(
+                samples_per_second=self.RATE,
+                bits_per_sample=16,
+                channels=1
+            )
+            self.azure_push_stream = self.azure_speechsdk.audio.PushAudioInputStream(stream_format=audio_format)
+            audio_config = self.azure_speechsdk.AudioConfig(stream=self.azure_push_stream)
+
+            self.azure_recognizer = self.azure_speechsdk.SpeechRecognizer(
+                speech_config=self.azure_speech_config,
+                audio_config=audio_config
+            )
+
+            def on_recognized(evt):
+                if evt.result.reason == self.azure_speechsdk.ResultReason.RecognizedKeyword:
+                    logger.info(f"🎯 Azure wake word detected | text='{evt.result.text}'")
+                    self.azure_wake_detected.set()
+
+            def on_canceled(evt):
+                cancellation = evt.result.cancellation_details
+                logger.debug(f"Azure keyword canceled | reason={cancellation.reason}")
+
+            self.azure_recognizer.recognized.connect(on_recognized)
+            self.azure_recognizer.canceled.connect(on_canceled)
+            self.azure_recognizer.start_keyword_recognition(self.azure_keyword_model)
+            self.azure_wake_detected.clear()
+            logger.info("🎧 Azure keyword recognition started.")
+        except Exception as e:
+            logger.error(f"❌ Azure keyword recognition start failed: {e}")
+            self.use_azure_wake = False
+
+    def _stop_azure_listening(self):
+        if self.azure_recognizer is not None:
+            try:
+                self.azure_recognizer.stop_keyword_recognition()
+                self.azure_recognizer.recognized.disconnect_all()
+                self.azure_recognizer.canceled.disconnect_all()
+            except Exception as e:
+                logger.debug(f"Azure recognizer stop error: {e}")
+            finally:
+                self.azure_recognizer = None
+
+        if self.azure_push_stream is not None:
+            try:
+                self.azure_push_stream.close()
+            except Exception:
+                pass
+            finally:
+                self.azure_push_stream = None
+
     def start(self):
         if not self.mic_available:
             logger.warning("🎤 Mic not available. Skipping audio loop start.")
@@ -168,7 +253,8 @@ class UnifiedVoiceAssistant:
         logger.info("🎧 Wake word listener thread starting...")
         self.listen_thread = threading.Thread(target=self._audio_loop, daemon=True)
         self.listen_thread.start()
-        logger.info("✅ Wake word listener active. Listening for 'Jarvis' / 'Hey Jarvis'...")
+        engine_name = "Azure (on-device)" if self.use_azure_wake else "Vosk"
+        logger.info(f"✅ Wake word listener active | engine={engine_name} | word='Jarvis' / 'Hey Jarvis'")
 
     def play_wake_sound(self):
         try:
@@ -259,27 +345,48 @@ class UnifiedVoiceAssistant:
         if not self.mic_available:
             return
 
+        if self.use_azure_wake:
+            self._start_azure_listening()
+
         while self.running:
             try:
                 pcm_data = self.stream.read(self.CHUNK, exception_on_overflow=False)
 
                 if not self.is_awake:
-                    is_speech = self.vad.is_speech(pcm_data, self.RATE)
                     triggered = False
+                    matched_text = ""
 
-                    if is_speech:
-                        if self.vosk_recognizer.AcceptWaveform(pcm_data):
-                            res = json.loads(self.vosk_recognizer.Result())
-                            text = res.get("text", "")
-                        else:
-                            res = json.loads(self.vosk_recognizer.PartialResult())
-                            text = res.get("partial", "")
+                    if self.use_azure_wake:
+                        if self.azure_push_stream is not None:
+                            try:
+                                self.azure_push_stream.write(pcm_data)
+                            except Exception as e:
+                                logger.error(f"Azure push stream write failed: {e}")
+                                self._stop_azure_listening()
+                                self._start_azure_listening()
+                                continue
 
-                        if self._check_wake_word(text):
+                        if self.azure_wake_detected.is_set():
+                            self.azure_wake_detected.clear()
                             triggered = True
+                            matched_text = "jarvis (azure)"
+                    else:
+                        is_speech = self.vad.is_speech(pcm_data, self.RATE)
+
+                        if is_speech:
+                            if self.vosk_recognizer.AcceptWaveform(pcm_data):
+                                res = json.loads(self.vosk_recognizer.Result())
+                                text = res.get("text", "")
+                            else:
+                                res = json.loads(self.vosk_recognizer.PartialResult())
+                                text = res.get("partial", "")
+
+                            if self._check_wake_word(text):
+                                triggered = True
+                                matched_text = text
 
                     if triggered:
-                        logger.info(f"🎯 Wake word detected | matched_text='{text}'")
+                        logger.info(f"🎯 Wake word detected | matched_text='{matched_text}'")
 
                         try:
                             from core.voice import tts
@@ -289,7 +396,13 @@ class UnifiedVoiceAssistant:
 
                         interrupt.set_interrupt()
                         self._flush_audio_buffer()
-                        self.vosk_recognizer.Reset()
+
+                        if self.use_azure_wake:
+                            self._stop_azure_listening()
+
+                        if self.vosk_recognizer:
+                            self.vosk_recognizer.Reset()
+
                         self.play_wake_sound()
                         update_stt_status("connecting", "Listening...")
 
@@ -301,7 +414,10 @@ class UnifiedVoiceAssistant:
                             else:
                                 logger.warning("⚠️ Deepgram connection failed. Returning to wake word mode.")
                                 self.connection_established = False
-                                self.vosk_recognizer.Reset()
+                                if self.use_azure_wake:
+                                    self._start_azure_listening()
+                                elif self.vosk_recognizer:
+                                    self.vosk_recognizer.Reset()
                                 continue
 
                         self.wake_time = time.time()
@@ -348,8 +464,14 @@ class UnifiedVoiceAssistant:
         self.connection_established = False
         self.is_awake = False
         self._flush_audio_buffer()
+
         if self.vosk_recognizer:
             self.vosk_recognizer.Reset()
+
+        if self.use_azure_wake:
+            self._stop_azure_listening()
+            self._start_azure_listening()
+
         update_stt_status("idle", "")
         logger.info("💤 Back to idle. Listening for wake word...")
 
@@ -373,8 +495,14 @@ class UnifiedVoiceAssistant:
             self.connection_established = False
 
         self._flush_audio_buffer()
+
         if self.vosk_recognizer:
             self.vosk_recognizer.Reset()
+
+        if self.use_azure_wake:
+            self._stop_azure_listening()
+            self._start_azure_listening()
+
         interrupt.clear_interrupt()
 
         if full_command and full_command not in ignore_words and len(full_command) > 3:
@@ -409,6 +537,9 @@ class UnifiedVoiceAssistant:
     def stop(self):
         logger.info("🛑 Stopping voice engine...")
         self.running = False
+
+        self._stop_azure_listening()
+
         try:
             if self.dg_connection:
                 self.dg_connection.finish()

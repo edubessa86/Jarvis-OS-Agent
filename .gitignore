@@ -22,6 +22,7 @@ Data/jarvis_indexer/
 Data/Staging/
 Data/jarvis_memory/
 Data/Jarvis_Workspace/
+Data/model/
 Data/MediaVault/
 Data/RAG/
 Data/model/vosk-model-small/
