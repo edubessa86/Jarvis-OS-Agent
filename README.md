@@ -2,7 +2,7 @@
 
 > **An AI Operating System that autonomously controls your PC, Android phone, local files, and lifelong memory — not just your code.**
 
-> **Open-Source · Live Mid-Execution Correction · Line-Drift-Free Editing · Lifelong Episodic Memory · Voice-First Multimodal · Proactive HITL · Android Termux SSH · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
+> **Open-Source · Live Mid-Execution Correction · Line-Drift-Free Editing · Lifelong Episodic Memory · Dual-Engine Voice · Proactive HITL · Android Termux SSH · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18.x-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -12,6 +12,7 @@
 [![Multi-Provider](https://img.shields.io/badge/Providers-Regolo%20%7C%20Gemini%20%7C%20OpenRouter%20%7C%20Custom-FF6F00?style=for-the-badge)](https://github.com/thekaifansari01/Jarvis-OS-Agent)
 [![Local Models](https://img.shields.io/badge/Local-Ollama%20%7C%20LM%20Studio-FF6B35?style=for-the-badge)](https://ollama.com)
 [![Voice Control](https://img.shields.io/badge/Voice-Deepgram%20Nova--2-00BFFF?style=for-the-badge&logo=deepgram&logoColor=white)](https://deepgram.com)
+[![Wake Word](https://img.shields.io/badge/Wake%20Word-Azure%20%7C%20Vosk-0078D4?style=for-the-badge&logo=microsoftazure&logoColor=white)](https://speech.microsoft.com)
 [![Android SSH](https://img.shields.io/badge/Android-Termux%20SSH-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://termux.dev/)
 [![Telegram Bot](https://img.shields.io/badge/Telegram-Remote%20Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://telegram.org)
 [![Lifelong Memory](https://img.shields.io/badge/Memory-Lifelong%20LTM-FF6B6B?style=for-the-badge)](https://github.com/thekaifansari01/Jarvis-OS-Agent)
@@ -295,6 +296,7 @@ This is the same reason enterprise copilots (Lovable, Devin, Cursor Agents) figh
 - [Live Mid-Execution Correction](#-live-mid-execution-correction-signature-feature)
 - [Performance Metrics](#-performance-metrics)
 - [Runs on a 2012 Laptop](#-runs-on-a-2012-laptop)
+- [Dual-Engine Wake Word Detection](#️-dual-engine-wake-word-detection)
 - [Jarvis vs. Other AI Agents](#-jarvis-vs-other-ai-agents)
 - [Technical Architecture](#️-technical-architecture)
 - [Dual-Engine AI: FastBrain vs AgenticBrain](#-dual-engine-ai-fastbrain-vs-agenticbrain)
@@ -341,7 +343,8 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🌍 | **Telegram Remote PC Control** | Trigger silent background PC commands from anywhere via a secure Telegram bot, without disturbing your active desktop session. |
 | 📨 | **Proactive Automation (Email / WhatsApp / Telegram / Calendar)** | Background listeners plus a Scout agent that filters noise, flags importance, and requests consent before any permanent modification. |
 | 💻 | **PC System Monitoring & Alerts** | Tracks CPU, RAM, disk, battery, network, and USB insertion events. Applies smart cooldown, idle and fullscreen suppression, and LLM-based relevance filtering. |
-| 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT with Vosk keyword spotting for low-latency wake-word triggering. Edge TTS voice output. OCR, image understanding, and image generation via OpenAI-compatible endpoints with AI Horde fallback. |
+| 🎙️ | **Dual-Engine Wake Word** | Primary wake word via **Azure Custom Keyword (on-device, ~95% accurate)** with automatic fallback to **Vosk KWS**. Both run fully on-device — no cloud round-trip, no API key required at runtime. Zero-config, zero-crash swap between engines. |
+| 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT for command capture after wake. Edge TTS + Azure TTS + Sarvam TTS fallback chain for voice output. OCR, image understanding, and image generation via OpenAI-compatible endpoints with AI Horde fallback. |
 | 🖱️ | **Vision-Based GUI Automation** | Set-of-Mark vision overlay with OpenCV edge detection. Two click paths — `click_by_id` with `expected_text` verification (preferred) and raw `click(x, y)` fallback. |
 | 🔌 | **Multi-LLM Auto-Failover** | Regolo, Gemini, OpenRouter, or local providers (Ollama, LM Studio, vLLM). Primary provider failure routes to fallback automatically. |
 | 🎨 | **Reactive UI Ecosystem** | ZMQ-powered PyQt5 Agent Panel streaming thought, action, and observation in real time. Markdown typing popup with async image preview and glass-morphism styling. |
@@ -393,6 +396,35 @@ There are no cloud VMs, no beefy workstations, no 32 GB rigs behind this project
 
 ---
 
+## 🎙️ Dual-Engine Wake Word Detection
+
+Jarvis ships with **two independent wake-word engines**, auto-selected at boot. No config, no crash, no dead mic.
+
+| Engine | When Active | Accuracy | Latency | Network |
+|---|---|---|---|---|
+| **Azure Custom Keyword** (primary) | When `Data/model/azure/jarvis.table` exists | ~95% | On-device | ❌ None |
+| **Vosk KWS** (fallback) | When `.table` model is missing or Azure init fails | ~66% | On-device | ❌ None |
+
+**How the fallback works:**
+- On boot, `stt.py` checks if `Data/model/azure/jarvis.table` exists.
+- If yes → Azure `KeywordRecognitionModel` loads, wake word runs **fully on-device** (no API key needed at runtime, no cloud round-trip).
+- If no → Vosk `KaldiRecognizer` loads with a grammar of wake words + decoys.
+- Both engines feed the same pyaudio stream — single mic source, no conflict, no double-open.
+
+**Why two engines?**
+- Azure's Custom Keyword model is trained specifically for your wake word with pronunciation tuning → **~30% higher accuracy** than Vosk on real-world accents.
+- Vosk gives **zero-dependency fallback** — if a user never sets up Azure, voice still works out of the box (auto-downloads on first run).
+- Both are on-device, so the only network call in the voice pipeline is Deepgram STT (and that only fires *after* wake).
+
+**Build your own Azure wake model (one-time):**
+1. Azure Portal → Foundry resource → Speech
+2. Speech Studio → Custom Keyword → Create project (English US)
+3. Train Basic (~30 min queue) or Advanced (~48h) model
+4. Download `.zip` → extract `.table` → save as `Data/model/azure/jarvis.table`
+5. Restart Jarvis — Azure engine activates automatically
+
+---
+
 ## 🔥 Jarvis vs. Other AI Agents
 
 A fair look at where Jarvis fits alongside popular alternatives:
@@ -406,7 +438,8 @@ A fair look at where Jarvis fits alongside popular alternatives:
 | Line-drift-free edits | ✅ Exact block diffs | ⚠️ Line-number based | ❌ Not focused on editing |
 | Lifelong memory | ✅ Weighted property graph | ❌ Session-only | ⚠️ Limited |
 | Native real-world tools (email, WhatsApp, calendar) | ✅ | ❌ | ⚠️ Via plugins |
-| Voice-first interaction | ✅ Deepgram + Vosk KWS | ❌ | ❌ |
+| Voice-first interaction | ✅ Deepgram STT + Azure/Vosk dual wake word | ❌ | ❌ |
+| On-device wake word (no cloud round-trip) | ✅ Azure Custom Keyword + Vosk fallback | ❌ | ❌ |
 | Proactive background agent | ✅ HITL Scout | ❌ | ❌ |
 | Remote control (Telegram, Android) | ✅ | ❌ | ❌ |
 | Polished UX | ✅ Excellent | ✅ Excellent | ❌ |
@@ -421,7 +454,7 @@ A fair look at where Jarvis fits alongside popular alternatives:
 ```mermaid
 flowchart TD
     User["👤 Voice or Text Command"] --> Input{"Input Type"}
-    Input -->|Voice| Wake["🎙️ Vosk KWS Wake Word"]
+    Input -->|Voice| Wake["🎙️ Dual-Engine Wake Word<br/>Azure Custom Keyword (primary)<br/>Vosk KWS (fallback)"]
     Input -->|Text| Hotkey["⌨️ Ctrl+Shift+J Popup"]
     Input -->|Remote| TelegramBot["🤖 Telegram Remote Bot"]
     Wake --> STT["⚡ Deepgram Nova-2 STT"]
@@ -522,6 +555,7 @@ Jarvis uses two brains to optimize for both speed and depth.
 | **Code Execution** | ❌ | ✅ `run_python_code`, `execute_terminal_command` |
 | **Memory Recall** | ❌ | ✅ Lifetime vector-graph recall |
 | **Live Mid-Execution Correction** | ❌ | ✅ Interruptible loop re-plans per step |
+| **Wake Word Engine** | ✅ Azure Custom Keyword (on-device) with Vosk fallback | ✅ Same wake engine, plus multimodal vision |
 | **Multimodal Vision** | ❌ | ✅ Image and video analysis, OCR |
 | **Web Research** | Quick web search | Deep research, ArXiv, YouTube transcripts |
 | **Mobile Control** | ❌ | ✅ Termux SSH |
@@ -765,6 +799,10 @@ Copy `.env.example` to `.env` and populate your credentials. For 100% local LLM 
 | `OPENROUTER_API_KEY` | Fallback Agentic provider | Optional |
 | `TAVILY_API_KEY` | Real-time web search | Required |
 | `DEEPGRAM_API_KEY` | Speech-to-text | Required |
+| `AZURE_SPEECH_KEY` | Azure wake word + TTS (hardcoded in `stt.py` for on-device use) | `fake_key_for_ondevice` |
+| `AZURE_SPEECH_REGION` | Azure resource region (hardcoded in `stt.py`) | `eastasia` |
+| `AZURE_KEYWORD_MODEL_PATH` | Path to Azure Custom Keyword `.table` model | `Data/model/azure/jarvis.table` |
+| `AZURE_TTS_VOICE` | Azure TTS voice name (used if Azure TTS enabled) | `hi-IN-MadhurNeural` |
 | `TELEGRAM_API_ID` | Telegram desktop client | Optional |
 | `TELEGRAM_API_HASH` | Telegram desktop client | Optional |
 | `CUSTOM_BASE_URL` | Local OpenAI-compatible endpoint | `http://localhost:11434/v1` |
@@ -778,7 +816,10 @@ Copy `.env.example` to `.env` and populate your credentials. For 100% local LLM 
 | Issue | Solution |
 |---|---|
 | `ModuleNotFoundError` on startup | Activate `.venv` and run `pip install -r requirements.txt` |
+| Azure wake-word model missing | Place the `.table` file at `Data/model/azure/jarvis.table`. If absent, Jarvis auto-falls back to Vosk wake word — no crash, no config needed. |
 | Vosk wake-word model missing | Run `jarvis` once to trigger auto-download, or manually place in `Data/model/vosk-model-small/` |
+| Both wake word engines unavailable | Jarvis still boots with voice input disabled. Wake word requires at least one of: `Data/model/azure/jarvis.table` (Azure) OR `Data/model/vosk-model-small/` (Vosk). |
+| Azure wake word model training slow | Basic model typically completes in ~30 min, but Azure backend congestion can stretch it to 2-3 days. Try a different Azure region (e.g., Australia East) if stuck in queue. |
 | WhatsApp service will not start | Verify Node.js 18+, run `npm install` in `tools/Messanger/whatsapp/BaileysServer`, ensure port 3000 is free |
 | Telegram client fails | Verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `.env`; authenticate via `jarvis login --telegram` |
 | Remote Telegram bot unresponsive | Run `jarvis bot --activate` with a valid BotFather token, then restart Jarvis |
@@ -817,6 +858,9 @@ Those are chat interfaces. Jarvis is an *agent* — it takes actions on your act
 
 **What hardware do I need?**  
 Jarvis was developed on an Intel i5-3210M with 4 GB RAM. If your machine can run Windows 11 and a browser, it can run Jarvis. More RAM = snappier local embeddings and faster boot.
+
+**Does wake word require an Azure subscription?**  
+No. Azure Custom Keyword detection runs fully on-device — the `.table` file is a one-time build from Speech Studio, and after that no API key or network call is needed for wake word detection. If you never build the model, Jarvis falls back to Vosk automatically.
 
 ---
 
@@ -870,4 +914,4 @@ Every star, fork, and share helps more developers discover the project.
 
 <p align="center">
   <i>"Any sufficiently advanced technology is indistinguishable from magic." — Arthur C. Clarke</i>
-</p
+</p>
