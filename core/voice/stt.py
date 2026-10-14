@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import time
 import math
@@ -42,6 +43,11 @@ VOSK_MODEL_NAME = "vosk-model-small-en-in-0.4"
 VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
 VOSK_MODEL_PATH = "Data/model/vosk-model-small"
 VOSK_DOWNLOAD_DIR = "Data/model/_download"
+
+MEMORY_DIR_PATH = "Data/jarvis_memory"
+LTM_GRAPH_PATH = os.path.join(MEMORY_DIR_PATH, "lifetime_graph.json")
+CHAT_HISTORY_PATH = os.path.join(MEMORY_DIR_PATH, "master_chat_history.jsonl")
+DAILY_SUMMARIES_PATH = os.path.join(MEMORY_DIR_PATH, "daily_summaries.jsonl")
 
 
 def download_vosk_model():
@@ -110,6 +116,520 @@ def download_vosk_model():
                 pass
 
 
+class DynamicVocabularyManager:
+    TIER_0_SEEDS = {
+        "Jarvis": 4,
+        "Kaif": 4,
+        "Ansari": 4,
+        "Mindly": 3,
+        "WhatsApp": 3,
+        "Telegram": 3,
+        "Gmail": 3,
+        "Calendar": 2,
+        "YouTube": 2,
+        "Google": 2,
+        "Chrome": 2,
+        "GitHub": 3,
+        "VSCode": 3,
+        "Python": 3,
+        "Pytest": 2,
+        "Flask": 2,
+        "FastAPI": 2,
+        "React": 2,
+        "Termux": 3,
+        "Tailscale": 2,
+        "Gemini": 3,
+        "Llama": 2,
+        "Regolo": 3,
+        "OpenRouter": 2,
+        "Ollama": 2,
+        "Deepgram": 2,
+        "Desktop": 2,
+        "Documents": 2,
+        "Downloads": 2,
+        "Screenshot": 2,
+        "Brightness": 2,
+        "Volume": 2,
+        "Bluetooth": 2,
+        "WiFi": 2,
+        "Kandhla": 3,
+        "Muzaffarnagar": 2,
+        "Shamli": 2,
+    }
+
+    DIRECT_PHONETIC_ALIASES = {
+        "kaf": "kaif",
+        "caf": "kaif",
+        "kayf": "kaif",
+        "qaif": "kaif",
+        "kef": "kaif",
+        "caif": "kaif",
+        "kaiph": "kaif",
+        "kefh": "kaif",
+        "caff": "kaif",
+        "kaff": "kaif",
+        "ansaree": "ansari",
+        "ansary": "ansari",
+        "unsari": "ansari",
+        "ansarii": "ansari",
+        "jarviz": "jarvis",
+        "jarves": "jarvis",
+        "jaarvis": "jarvis",
+        "watsapp": "whatsapp",
+        "whatsap": "whatsapp",
+        "githab": "github",
+        "termax": "termux",
+    }
+
+    NAME_CONTEXT_TRIGGERS = {
+        "cap", "cab", "calf", "cave", "chef", "safe", "case", "cash",
+        "cast", "care", "camp", "cake", "cafe", "half", "kept", "cat"
+    }
+
+    PROTECTED_WORDS = {
+        "the", "and", "for", "with", "this", "that", "from", "have", "what",
+        "when", "where", "which", "who", "whom", "whose", "why", "how", "can",
+        "cat", "car", "cap", "cab", "calf", "call", "care", "case", "cash",
+        "cast", "card", "cart", "calm", "came", "camp", "cake", "cafe", "half",
+        "safe", "save", "same", "name", "game", "time", "file", "files", "line",
+        "code", "word", "words", "world", "worlds", "work", "works", "walk",
+        "wall", "want", "warm", "wash", "watch", "water", "wave", "way", "week",
+        "well", "went", "were", "west", "wheel", "while", "white", "whole",
+        "wide", "wife", "wild", "will", "wind", "wine", "wing", "winter",
+        "wire", "wise", "wish", "woman", "women", "wonder", "wood", "wool",
+        "yard", "year", "yellow", "yes", "yesterday", "yet", "you", "young",
+        "your", "zero", "zone", "open", "close", "start", "stop", "run", "make",
+        "create", "delete", "remove", "send", "read", "write", "check", "find",
+        "search", "play", "pause", "mute", "unmute", "lock", "unlock", "mail",
+        "email", "message", "folder", "project", "app", "application", "system",
+        "agent", "user", "info", "data", "unknown", "today", "tomorrow", "thing",
+        "stuff", "hello", "okay", "thanks", "thank", "please", "sorry", "help",
+        "mera", "meri", "mere", "naam", "hai", "hain", "hoon", "tha", "thi",
+        "aur", "par", "lekin", "kya", "kaise", "kab", "kahan", "kyun", "isko",
+        "usko", "apna", "apni", "bhai", "yaar", "ek", "do", "teen", "bhi", "toh",
+        "nahi", "mat", "kar", "karo", "karna", "kardo", "bolo", "batao", "dekho",
+        "suno", "chalo", "abhi", "aaj", "kal", "wala", "wali", "wale", "acha",
+        "theek", "haan", "bhej", "bhejo", "khol", "kholo", "band", "chala", "chalao"
+    }
+
+    WORLD_LEFT_CONTEXT = {
+        "hello", "whole", "real", "wide", "modern", "virtual", "digital",
+        "entire", "outside", "around", "across", "save", "change", "rule",
+        "open", "new", "old", "third", "first", "free", "material", "natural",
+        "physical", "under", "dream", "fantasy", "future", "ancient", "best",
+        "biggest", "largest", "fastest", "richest", "most"
+    }
+
+    WORLD_RIGHT_CONTEXT = {
+        "cup", "war", "map", "record", "records", "wide", "bank", "health",
+        "trade", "series", "tour", "champion", "championship", "peace",
+        "population", "history", "economy", "news", "leader", "leaders",
+        "order", "view", "famous", "class", "largest", "biggest", "best",
+        "worst", "ending"
+    }
+
+    WORD_LEFT_CONTEXT = {
+        "microsoft", "ms", "wake", "key", "pass", "code", "single", "every",
+        "last", "one", "english", "hindi", "root", "buzz", "cross", "sight",
+        "spoken", "written", "exact", "right", "wrong", "bad", "good", "swear",
+        "curse", "magic", "secret", "another", "other", "each", "vocabulary"
+    }
+
+    WORD_RIGHT_CONTEXT = {
+        "file", "files", "document", "documents", "doc", "docs", "docx",
+        "count", "meaning", "meanings", "definition", "processor", "processing",
+        "pad", "press", "wordpress", "list", "play", "search", "limit",
+        "length", "boundary", "embeddings", "embedding", "vector", "token",
+        "tokens", "level", "choice", "game", "puzzle", "format", "app"
+    }
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._ltm_mtime = -1.0
+        self._history_mtime = -1.0
+        self._summary_mtime = -1.0
+        self._ltm_entities = {}
+        self._history_entities = {}
+        self._summary_entities = {}
+        self._merged_keywords = []
+        self._known_proper_nouns = {}
+        self._phonetic_index = {}
+        self._rebuild_merged_state()
+
+    @staticmethod
+    def _phonetic_key(word):
+        w = re.sub(r"[^a-z]", "", word.lower())
+        if not w:
+            return ""
+        w = w.replace("ph", "f").replace("gh", "g").replace("kh", "k").replace("sh", "s").replace("ch", "c")
+        w = w.replace("q", "k").replace("c", "k").replace("z", "s").replace("v", "w").replace("y", "i")
+        w = re.sub(r"[aeiou]+", "a", w)
+        dedup = [w[0]]
+        for ch in w[1:]:
+            if ch != dedup[-1]:
+                dedup.append(ch)
+        return "".join(dedup)
+
+    @staticmethod
+    def _edit_distance(s1, s2):
+        if s1 == s2:
+            return 0
+        if len(s1) < len(s2):
+            s1, s2 = s2, s1
+        if not s2:
+            return len(s1)
+        prev_row = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
+
+    def _is_valid_entity_token(self, token):
+        if not token or not isinstance(token, str):
+            return False
+        clean = token.strip()
+        if len(clean) < 3 or len(clean) > 20:
+            return False
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", clean):
+            return False
+        low = clean.lower()
+        if low in self.PROTECTED_WORDS:
+            return False
+        if low.isdigit():
+            return False
+        return True
+
+    def _extract_entities_from_graph_file(self, path):
+        extracted = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+
+        if not isinstance(data, dict):
+            return {}
+
+        node_scores = {}
+        for node_obj in data.get("nodes", []):
+            if isinstance(node_obj, dict):
+                node_id = str(node_obj.get("id", "")).strip()
+                if node_id:
+                    node_scores[node_id] = node_scores.get(node_id, 1.0)
+
+        edges = data.get("links") or data.get("edges") or []
+        for edge in edges:
+            if not isinstance(edge, dict) or edge.get("archived", False):
+                continue
+            weight = float(edge.get("weight", 1) or 1)
+            count = float(edge.get("count", 1) or 1)
+            score_add = min(4.0, 1.0 + (weight * 0.4) + (count * 0.2))
+            for key in ("source", "target"):
+                val = str(edge.get(key, "")).strip()
+                if val:
+                    node_scores[val] = node_scores.get(val, 0.0) + score_add
+
+            meta = edge.get("metadata")
+            if isinstance(meta, dict):
+                src_msg = str(meta.get("source_message", ""))
+                if src_msg:
+                    self._extract_from_text_into(src_msg, extracted, base_boost=3)
+
+        for phrase, raw_score in node_scores.items():
+            boost = 4 if raw_score >= 4.0 else (3 if raw_score >= 2.0 else 2)
+            for part in re.findall(r"[A-Za-z]{3,20}", phrase):
+                if self._is_valid_entity_token(part):
+                    canon = part.capitalize()
+                    if boost > extracted.get(canon, 0):
+                        extracted[canon] = boost
+
+        return extracted
+
+    def _extract_from_text_into(self, text, target_dict, base_boost=3):
+        if not text or not isinstance(text, str):
+            return
+
+        patterns = [
+            r"(?:mera\s+naam|my\s+name\s+is|i\s+am|main\s+hoon|call\s+me)\s+([A-Za-z]{3,18}(?:\s+[A-Za-z]{3,18})?)",
+            r"(?:mail|email|whatsapp|message|call)\s+(?:to\s+|karo\s+|kardo\s+)?([A-Za-z]{3,18})",
+            r"([A-Za-z]{3,18})\s+(?:ko\s+mail|ko\s+whatsapp|ko\s+message|ko\s+call)",
+        ]
+
+        for pat in patterns:
+            for match in re.finditer(pat, text, flags=re.IGNORECASE):
+                group_val = match.group(1)
+                for token in re.findall(r"[A-Za-z]{3,18}", group_val):
+                    if self._is_valid_entity_token(token):
+                        canon = token.capitalize()
+                        target_dict[canon] = max(target_dict.get(canon, 0), base_boost)
+
+        for cap_word in re.findall(r"\b[A-Z][a-z]{2,17}\b", text):
+            if self._is_valid_entity_token(cap_word):
+                target_dict[cap_word] = max(target_dict.get(cap_word, 0), 2)
+
+    def _extract_entities_from_jsonl_file(self, path, field_name):
+        extracted = {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()[-120:]
+        except Exception:
+            return None
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    text = str(obj.get(field_name, ""))
+                    if text:
+                        self._extract_from_text_into(text, extracted, base_boost=3)
+            except Exception:
+                continue
+
+        return extracted
+
+    def _rebuild_merged_state(self):
+        combined = {}
+        for word, boost in self.TIER_0_SEEDS.items():
+            combined[word.lower()] = (word, int(boost))
+
+        for source_dict in (self._ltm_entities, self._history_entities, self._summary_entities):
+            for word, boost in source_dict.items():
+                low = word.lower()
+                if low in combined:
+                    prev_word, prev_boost = combined[low]
+                    combined[low] = (prev_word, max(prev_boost, int(boost)))
+                else:
+                    combined[low] = (word, int(boost))
+
+        sorted_items = sorted(
+            combined.values(),
+            key=lambda item: (item[1], len(item[0])),
+            reverse=True
+        )[:65]
+
+        self._merged_keywords = [f"{w}:{b}" for w, b in sorted_items]
+
+        proper_nouns = {}
+        phonetic_map = {}
+        for w, b in sorted_items:
+            low = w.lower()
+            proper_nouns[low] = b
+            if len(low) >= 4:
+                pkey = self._phonetic_key(low)
+                if pkey:
+                    phonetic_map.setdefault(pkey, []).append(low)
+
+        self._known_proper_nouns = proper_nouns
+        self._phonetic_index = phonetic_map
+
+    def refresh_if_needed(self):
+        with self._lock:
+            changed = False
+
+            if os.path.exists(LTM_GRAPH_PATH):
+                try:
+                    mtime = os.path.getmtime(LTM_GRAPH_PATH)
+                    if mtime != self._ltm_mtime:
+                        res = self._extract_entities_from_graph_file(LTM_GRAPH_PATH)
+                        if res is not None:
+                            self._ltm_entities = res
+                            self._ltm_mtime = mtime
+                            changed = True
+                except OSError:
+                    pass
+            elif self._ltm_mtime != -1.0 or self._ltm_entities:
+                self._ltm_mtime = -1.0
+                self._ltm_entities = {}
+                changed = True
+
+            if os.path.exists(CHAT_HISTORY_PATH):
+                try:
+                    mtime = os.path.getmtime(CHAT_HISTORY_PATH)
+                    if mtime != self._history_mtime:
+                        res = self._extract_entities_from_jsonl_file(CHAT_HISTORY_PATH, "message")
+                        if res is not None:
+                            self._history_entities = res
+                            self._history_mtime = mtime
+                            changed = True
+                except OSError:
+                    pass
+            elif self._history_mtime != -1.0 or self._history_entities:
+                self._history_mtime = -1.0
+                self._history_entities = {}
+                changed = True
+
+            if os.path.exists(DAILY_SUMMARIES_PATH):
+                try:
+                    mtime = os.path.getmtime(DAILY_SUMMARIES_PATH)
+                    if mtime != self._summary_mtime:
+                        res = self._extract_entities_from_jsonl_file(DAILY_SUMMARIES_PATH, "summary")
+                        if res is not None:
+                            self._summary_entities = res
+                            self._summary_mtime = mtime
+                            changed = True
+                except OSError:
+                    pass
+            elif self._summary_mtime != -1.0 or self._summary_entities:
+                self._summary_mtime = -1.0
+                self._summary_entities = {}
+                changed = True
+
+            if changed:
+                self._rebuild_merged_state()
+
+    def get_deepgram_keywords(self):
+        self.refresh_if_needed()
+        with self._lock:
+            return list(self._merged_keywords)
+
+    def select_best_transcript(self, alternatives):
+        if not alternatives:
+            return ""
+        primary = getattr(alternatives[0], "transcript", "") or ""
+        if not primary.strip() or len(alternatives) == 1:
+            return primary
+
+        with self._lock:
+            known = self._known_proper_nouns
+
+        def _score_candidate(alt, idx):
+            txt = (getattr(alt, "transcript", "") or "").strip()
+            if not txt:
+                return -999.0
+            conf = float(getattr(alt, "confidence", 0.85) or 0.85)
+            tokens = re.findall(r"[a-zA-Z]+", txt.lower())
+            entity_bonus = 0.0
+            for t in tokens:
+                if t in known:
+                    entity_bonus += 0.06 * known[t]
+                elif t in self.DIRECT_PHONETIC_ALIASES:
+                    entity_bonus -= 0.05
+            rank_penalty = idx * 0.03
+            return conf + entity_bonus - rank_penalty
+
+        best_alt = max(
+            enumerate(alternatives[:3]),
+            key=lambda item: _score_candidate(item[1], item[0])
+        )[1]
+        return getattr(best_alt, "transcript", "") or primary
+
+    def _resolve_word_vs_world(self, tokens):
+        n = len(tokens)
+        if n == 0:
+            return tokens
+
+        out = list(tokens)
+        for i, tok in enumerate(out):
+            low = re.sub(r"[^a-z]", "", tok.lower())
+            if low not in ("word", "world", "words", "worlds"):
+                continue
+
+            is_plural = low.endswith("s")
+            prev_w = re.sub(r"[^a-z]", "", out[i - 1].lower()) if i > 0 else ""
+            prev2_w = re.sub(r"[^a-z]", "", out[i - 2].lower()) if i > 1 else ""
+            next_w = re.sub(r"[^a-z]", "", out[i + 1].lower()) if (i + 1) < n else ""
+
+            target_base = None
+
+            if prev_w in ("the", "this", "that", "my", "our") and prev2_w in (
+                "in", "of", "around", "across", "over", "into", "throughout", "from", "to"
+            ):
+                if next_w not in self.WORD_RIGHT_CONTEXT:
+                    target_base = "world"
+
+            if target_base is None:
+                if prev_w in self.WORLD_LEFT_CONTEXT or next_w in self.WORLD_RIGHT_CONTEXT:
+                    target_base = "world"
+                elif prev_w in self.WORD_LEFT_CONTEXT or next_w in self.WORD_RIGHT_CONTEXT:
+                    target_base = "word"
+
+            if target_base is not None:
+                replacement = target_base + ("s" if is_plural else "")
+                prefix = re.match(r"^[^a-zA-Z]*", tok).group(0)
+                suffix = re.search(r"[^a-zA-Z]*$", tok).group(0)
+                out[i] = f"{prefix}{replacement}{suffix}"
+
+        return out
+
+    def repair_transcript(self, text):
+        if not text or not text.strip():
+            return ""
+
+        with self._lock:
+            known_nouns = dict(self._known_proper_nouns)
+            phonetic_idx = dict(self._phonetic_index)
+
+        raw_tokens = text.strip().split()
+        if not raw_tokens:
+            return ""
+
+        repaired = []
+        n = len(raw_tokens)
+
+        for i, raw_tok in enumerate(raw_tokens):
+            prefix = re.match(r"^[^a-zA-Z0-9]*", raw_tok).group(0)
+            suffix = re.search(r"[^a-zA-Z0-9]*$", raw_tok).group(0)
+            core = raw_tok[len(prefix):len(raw_tok) - len(suffix)] if (len(prefix) + len(suffix)) < len(raw_tok) else raw_tok
+            low = core.lower()
+
+            if not low or not low.isalpha():
+                repaired.append(raw_tok)
+                continue
+
+            if low in self.DIRECT_PHONETIC_ALIASES:
+                fixed = self.DIRECT_PHONETIC_ALIASES[low]
+                repaired.append(f"{prefix}{fixed}{suffix}")
+                continue
+
+            prev_low = re.sub(r"[^a-z]", "", raw_tokens[i - 1].lower()) if i > 0 else ""
+            prev2_low = re.sub(r"[^a-z]", "", raw_tokens[i - 2].lower()) if i > 1 else ""
+            next_low = re.sub(r"[^a-z]", "", raw_tokens[i + 1].lower()) if (i + 1) < n else ""
+
+            is_name_context = (
+                (prev_low == "naam" and prev2_low in ("mera", "apna"))
+                or (prev_low == "is" and prev2_low == "name")
+                or next_low in ("ansari", "ansaree", "ansary")
+            )
+
+            if is_name_context and (low in self.NAME_CONTEXT_TRIGGERS or self._edit_distance(low, "kaif") <= 2):
+                repaired.append(f"{prefix}kaif{suffix}")
+                continue
+
+            if low in self.PROTECTED_WORDS or low in known_nouns or len(low) < 4:
+                repaired.append(raw_tok)
+                continue
+
+            pkey = self._phonetic_key(low)
+            candidates = phonetic_idx.get(pkey, [])
+            best_match = None
+            best_dist = 99
+
+            for cand in candidates:
+                if abs(len(cand) - len(low)) > 1:
+                    continue
+                dist = self._edit_distance(low, cand)
+                max_allowed = 1 if len(cand) <= 6 else 2
+                if dist <= max_allowed and dist < best_dist:
+                    best_dist = dist
+                    best_match = cand
+
+            if best_match:
+                repaired.append(f"{prefix}{best_match}{suffix}")
+            else:
+                repaired.append(raw_tok)
+
+        repaired = self._resolve_word_vs_world(repaired)
+        return " ".join(repaired).strip()
+
+
 class UnifiedVoiceAssistant:
     def __init__(self):
         self.mic_available = False
@@ -138,9 +658,12 @@ class UnifiedVoiceAssistant:
         self._hp_prev_x = 0.0
         self._hp_prev_y = 0.0
         self._pre_prev_y = 0.0
+        self._dg_hp_prev_x = 0.0
+        self._dg_hp_prev_y = 0.0
         self._noise_floor_rms = 60.0
         self._agc_gain = 1.2
         self._last_reset_time = 0.0
+        self.vocab_manager = DynamicVocabularyManager()
 
         try:
             self.vad = webrtcvad.Vad(2)
@@ -211,6 +734,34 @@ class UnifiedVoiceAssistant:
         self._hp_prev_y = 0.0
         self._pre_prev_y = 0.0
         self.frame_history.clear()
+
+    def _condition_deepgram_audio(self, pcm_data):
+        samples = array.array("h")
+        samples.frombytes(pcm_data)
+        n_samples = len(samples)
+        if n_samples == 0:
+            return pcm_data
+
+        hp_prev_x = self._dg_hp_prev_x
+        hp_prev_y = self._dg_hp_prev_y
+        hp_alpha = 0.967
+        out_samples = array.array("h", [0] * n_samples)
+
+        for i in range(n_samples):
+            x = float(samples[i])
+            hp_y = hp_alpha * (hp_prev_y + x - hp_prev_x)
+            hp_prev_x = x
+            hp_prev_y = hp_y
+            val = int(hp_y)
+            if val > 32767:
+                val = 32767
+            elif val < -32768:
+                val = -32768
+            out_samples[i] = val
+
+        self._dg_hp_prev_x = hp_prev_x
+        self._dg_hp_prev_y = hp_prev_y
+        return out_samples.tobytes()
 
     def _analyze_and_condition_audio(self, pcm_data):
         try:
@@ -475,23 +1026,34 @@ class UnifiedVoiceAssistant:
     def _setup_deepgram(self):
         self.current_transcript = ""
         self.live_text = ""
+        self._dg_hp_prev_x = 0.0
+        self._dg_hp_prev_y = 0.0
         self.command_done.clear()
         assistant = self
 
         try:
+            dynamic_keywords = self.vocab_manager.get_deepgram_keywords()
             self.dg_connection = deepgram.listen.websocket.v("1")
 
             def on_message(dg_self, result, **kwargs):
-                sentence = result.channel.alternatives[0].transcript
+                alternatives = getattr(result.channel, "alternatives", None)
+                if not alternatives:
+                    return
+                sentence = assistant.vocab_manager.select_best_transcript(alternatives)
                 if sentence:
+                    repaired_sentence = assistant.vocab_manager.repair_transcript(sentence)
                     if result.is_final:
-                        assistant.current_transcript += " " + sentence
-                        assistant.live_text = assistant.current_transcript.strip()
+                        assistant.current_transcript = assistant.vocab_manager.repair_transcript(
+                            (assistant.current_transcript + " " + repaired_sentence).strip()
+                        )
+                        assistant.live_text = assistant.current_transcript
                     else:
-                        assistant.live_text = (assistant.current_transcript + " " + sentence).strip()
+                        assistant.live_text = assistant.vocab_manager.repair_transcript(
+                            (assistant.current_transcript + " " + repaired_sentence).strip()
+                        )
                     update_stt_status("listening", assistant.live_text)
 
-                if getattr(result, 'speech_final', False) and assistant.live_text.strip():
+                if getattr(result, "speech_final", False) and assistant.live_text.strip():
                     assistant.command_done.set()
 
             def on_utterance_end(dg_self, utterance_end, **kwargs):
@@ -509,7 +1071,7 @@ class UnifiedVoiceAssistant:
             options = LiveOptions(
                 model="nova-2",
                 language="hi",
-                keywords=["Jarvis:4", "Mindly:3", "Llama:2", "Gemini:2", "Kaif:3", "Youtube", "Google", "ansari"],
+                keywords=dynamic_keywords,
                 smart_format=True,
                 interim_results=True,
                 vad_events=True,
@@ -524,7 +1086,7 @@ class UnifiedVoiceAssistant:
                 logger.error("❌ Failed to start Deepgram websocket connection.")
                 return False
 
-            logger.info("🔗 Deepgram websocket connected successfully.")
+            logger.info(f"🔗 Deepgram websocket connected | active_keywords={len(dynamic_keywords)}")
             return True
 
         except Exception as e:
@@ -652,7 +1214,8 @@ class UnifiedVoiceAssistant:
 
                     if self.dg_connection:
                         try:
-                            self.dg_connection.send(pcm_data)
+                            clean_dg_pcm = self._condition_deepgram_audio(pcm_data)
+                            self.dg_connection.send(clean_dg_pcm)
                         except Exception as e:
                             logger.error(f"❌ Lost Deepgram connection while sending audio: {e}")
                             self._force_sleep_reset()
@@ -684,7 +1247,8 @@ class UnifiedVoiceAssistant:
         logger.info("💤 Back to idle. Listening for wake word...")
 
     def process_final_command(self):
-        full_command = self.live_text.lower().strip()
+        repaired_text = self.vocab_manager.repair_transcript(self.live_text)
+        full_command = repaired_text.lower().strip()
         ignore_words = ["", "okay", "okay.", "jarvis", "jarvis.", "thanks", "thank you",
                         "hmm", "haan", "ah", "uh", "theek hai", "hello", "ha"]
 

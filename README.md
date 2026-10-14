@@ -344,7 +344,7 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 📨 | **Proactive Automation (Email / WhatsApp / Telegram / Calendar)** | Background listeners plus a Scout agent that filters noise, flags importance, and requests consent before any permanent modification. |
 | 💻 | **PC System Monitoring & Alerts** | Tracks CPU, RAM, disk, battery, network, and USB insertion events. Applies smart cooldown, idle and fullscreen suppression, and LLM-based relevance filtering. |
 | 🎙️ | **Dual-Engine Wake Word** | Primary wake word via **Azure Custom Keyword (on-device, 97%+ accurate)** backed by a real-time DSP audio conditioner (85Hz High-Pass IIR filter, Pre-Emphasis, Speech-Gated AGC) and a 5-gate acoustic verifier (Dual WebRTC VAD, SNR, ZCR, duration gating), with automatic fallback to **Vosk KWS**. Both run fully on-device with zero cloud round-trip. |
-| 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT for command capture after wake. Edge TTS + Azure TTS + Sarvam TTS fallback chain for voice output. OCR, image understanding, and image generation via OpenAI-compatible endpoints with AI Horde fallback. |
+| 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT supercharged by a self-healing LTM vocabulary cache (auto-syncing entities from `lifetime_graph.json` and chat history), 85Hz high-pass audio conditioning, multi-alternative confidence scoring, and `<1ms` phonetic/contextual transcript repair (`kaf/caf` → `Kaif`, `word` ↔ `world`). Edge TTS + Azure TTS + Sarvam TTS fallback chain for voice output, plus multimodal OCR and image generation. |
 | 🖱️ | **Vision-Based GUI Automation** | Set-of-Mark vision overlay with OpenCV edge detection. Two click paths — `click_by_id` with `expected_text` verification (preferred) and raw `click(x, y)` fallback. |
 | 🔌 | **Multi-LLM Auto-Failover** | Regolo, Gemini, OpenRouter, or local providers (Ollama, LM Studio, vLLM). Primary provider failure routes to fallback automatically. |
 | 🎨 | **Reactive UI Ecosystem** | ZMQ-powered PyQt5 Agent Panel streaming thought, action, and observation in real time. Markdown typing popup with async image preview and glass-morphism styling. |
@@ -457,7 +457,7 @@ flowchart TD
     Input -->|Voice| Wake["🎙️ Dual-Engine Wake Word<br/>Azure Custom Keyword (primary)<br/>Vosk KWS (fallback)"]
     Input -->|Text| Hotkey["⌨️ Ctrl+Shift+J Popup"]
     Input -->|Remote| TelegramBot["🤖 Telegram Remote Bot"]
-    Wake --> STT["⚡ Deepgram Nova-2 STT"]
+    Wake --> STT["⚡ Deepgram Nova-2 STT<br/>LTM Vocab Cache + Phonetic & N-Gram Repair"]
     Hotkey --> Router["🚦 Hybrid Semantic Router"]
     TelegramBot -->|Silent Flag| Router
     STT --> Router
