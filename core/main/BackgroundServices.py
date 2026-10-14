@@ -179,9 +179,14 @@ def stop_mobile_bridge():
 
 def is_mobile_bridge_running() -> bool:
     global _mobile_bridge_process
-    if _mobile_bridge_process is None:
+    if _mobile_bridge_process is None or _mobile_bridge_process.poll() is not None:
         return False
-    return _mobile_bridge_process.poll() is None
+    try:
+        import socket
+        with socket.create_connection(("127.0.0.1", 8090), timeout=1.5):
+            return True
+    except Exception:
+        return _mobile_bridge_process.poll() is None
 
 def start_rag_engine():
     global _rag_engine_init_started, _rag_engine_initialized

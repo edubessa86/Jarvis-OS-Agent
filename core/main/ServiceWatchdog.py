@@ -8,10 +8,12 @@ from core.main.BackgroundServices import (
     start_stt_popup,
     start_telegram_remote_service,
     start_indexer_dashboard,
+    start_mobile_bridge,
     is_baileys_running,
     is_stt_popup_running,
     is_telegram_remote_service_running,
     is_indexer_dashboard_running,
+    is_mobile_bridge_running,
     is_rag_engine_init_started,
     is_telegram_remote_init_started,
     is_stt_mic_available
@@ -44,6 +46,14 @@ class ServiceWatchdog:
                 "last_restart": 0,
                 "next_retry_time": 0,
                 "has_creds": is_stt_mic_available
+            },
+            "mobile_bridge": {
+                "is_running_check": is_mobile_bridge_running,
+                "start_func": start_mobile_bridge,
+                "retries": 0,
+                "last_restart": 0,
+                "next_retry_time": 0,
+                "has_creds": lambda: True
             },
             "telegram_remote": {
                 "is_running_check": is_telegram_remote_service_running,

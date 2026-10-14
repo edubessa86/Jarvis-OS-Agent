@@ -586,19 +586,22 @@ Jarvis implements a **four-tier** memory system:
 
 ---
 
-## 📱 Android Mobile Control via Termux SSH
+## 📱 Android Mobile Control via Termux & WebSocket Bridge
 
-Control your Android phone natively from Windows using Termux API over a Tailscale SSH tunnel.
+Control your Android phone natively from Windows using a persistent Async WebSocket Bridge. No SSH required.
 
 | Category | Example Capabilities |
 |---|---|
-| **Telecom** | Direct calls without dialer UI, read and send SMS |
-| **Volume & Media** | Volume up or down, mute, custom alert playback |
-| **Sensors** | Flashlight, vibrate, battery, location, accelerometer |
-| **Notifications** | Read incoming, push custom rich notifications |
-| **Automation** | Clipboard sync, silent camera capture |
+| **Zero-Copy File Transfer** | Drag & drop files from the UI, or send via Android's native "Share" menu direct to PC. |
+| **Proactive Quick Actions** | Fetch latest photo, pull screenshots, sync clipboard, or ring phone via the Web Dashboard. |
+| **Telecom & Sensors** | Make calls, read/send SMS, fetch GPS location, read battery/storage, toggle flashlight. |
+| **Device Telemetry** | Live streaming of device health, IP, free storage, and battery temperature to the UI. |
+| **Persistent Wake-Lock** | Runs silently in the background even when the phone screen is locked. |
 
-**Setup:** Install **Termux** and **Termux:API** from F-Droid. Configure OpenSSH (`sshd`) with key-based authentication. Connect both devices via **Tailscale**.
+**Setup:** 
+1. Install **Termux** and **Termux:API** from F-Droid on your Android device.
+2. Open the Jarvis Mobile Bridge dashboard at `http://127.0.0.1:8090`.
+3. Scan the QR code or copy the setup command into your Termux terminal. The bridge will auto-install, configure the Android Share menu, and connect instantly.
 
 ---
 

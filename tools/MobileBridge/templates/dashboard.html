@@ -691,6 +691,161 @@
             cursor: wait;
             transform: none;
         }
+
+        .device {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 12px;
+        }
+
+        .device-top {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            width: 100%;
+        }
+
+        .device.dragover {
+            border-color: var(--accent);
+            box-shadow: 0 0 28px rgba(56, 189, 248, 0.35);
+            background: rgba(14, 165, 233, 0.12);
+        }
+
+        .meta-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 4px;
+        }
+
+        .meta-pill {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid var(--border);
+            color: var(--muted);
+            font-weight: 600;
+            letter-spacing: 0.4px;
+        }
+
+        .device-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(148, 163, 184, 0.1);
+        }
+
+        .action-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .btn-action {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.65);
+            color: var(--text);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .btn-action i {
+            color: var(--accent);
+            font-size: 11px;
+        }
+
+        .btn-action:hover {
+            border-color: var(--border-hover);
+            background: rgba(56, 189, 248, 0.14);
+            transform: translateY(-1px);
+        }
+
+        .btn-action:disabled {
+            opacity: 0.45;
+            cursor: wait;
+            transform: none;
+        }
+
+        .drop-hint {
+            font-size: 10px;
+            color: var(--muted-2);
+            letter-spacing: 0.5px;
+        }
+
+        .transfer-banner {
+            margin-top: 16px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.85);
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .transfer-banner.active {
+            display: flex;
+        }
+
+        .transfer-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11.5px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .transfer-bar-bg {
+            width: 100%;
+            height: 6px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.18);
+            overflow: hidden;
+        }
+
+        .transfer-bar-fill {
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--accent), var(--accent-3), var(--success));
+            transition: width 0.2s ease;
+        }
+
+        .toast-msg {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 999;
+            padding: 12px 18px;
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.92);
+            border: 1px solid var(--border-hover);
+            color: #f8fafc;
+            font-size: 12px;
+            font-weight: 600;
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.6);
+            opacity: 0;
+            transform: translateY(15px);
+            pointer-events: none;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .toast-msg.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
     </style>
 </head>
 <body>
@@ -711,7 +866,7 @@
             </div>
             <div class="live-pill">
                 <span class="pulse"></span>
-                <span>Listening</span>
+                <span id="bridge-pill-text">Listening</span>
             </div>
         </header>
 
@@ -733,7 +888,7 @@
             <div class="stat">
                 <i class="fa-solid fa-network-wired"></i>
                 <div>
-                    <span>Online</span>
+                    <span id="stat-status">Online</span>
                     <small>Bridge Status</small>
                 </div>
             </div>
@@ -756,7 +911,7 @@
                     </div>
                     <p class="tip">
                         <i class="fa-solid fa-lightbulb"></i>
-                        Open Termux on Android &amp; scan · or tap to copy
+                        Termux &middot; Share any file on Android &rarr; Termux to send to PC
                     </p>
                 </div>
             </article>
@@ -773,15 +928,35 @@
                         <p>No devices paired yet</p>
                     </div>
                 </div>
+                <div class="transfer-banner" id="transfer-banner">
+                    <div class="transfer-head">
+                        <span id="transfer-title">Transferring file...</span>
+                        <span id="transfer-pct">0%</span>
+                    </div>
+                    <div class="transfer-bar-bg">
+                        <div class="transfer-bar-fill" id="transfer-fill"></div>
+                    </div>
+                </div>
             </article>
         </section>
     </main>
 
+    <input type="file" id="hidden-file-input" multiple style="display:none">
+    <div class="toast-msg" id="toast-msg"></div>
+
     <script>
         const port = "{{port}}";
         const devices = new Map();
-
         const CIRC = 113.1;
+        let currentUploadTarget = null;
+
+        function showToast(text) {
+            const t = document.getElementById('toast-msg');
+            t.innerText = text;
+            t.classList.add('show');
+            clearTimeout(t._timer);
+            t._timer = setTimeout(() => t.classList.remove('show'), 3200);
+        }
 
         function escapeHtml(s) {
             return String(s).replace(/[&<>"']/g, c => ({
@@ -815,27 +990,168 @@
             `;
         }
 
-        function deviceHTML(id, battery) {
+        function metaPillsHTML(storage, network, battery) {
+            const pills = [];
+            if (storage && storage.free_gb != null) {
+                pills.push(`<span class="meta-pill"><i class="fa-solid fa-hard-drive"></i> ${storage.free_gb} GB free</span>`);
+            }
+            if (network && network.ip) {
+                pills.push(`<span class="meta-pill"><i class="fa-solid fa-wifi"></i> ${escapeHtml(network.ip)}</span>`);
+            }
+            if (battery && battery.temperature != null) {
+                pills.push(`<span class="meta-pill">${battery.temperature}&deg;C</span>`);
+            }
+            return pills.length ? `<div class="meta-pills">${pills.join('')}</div>` : `<div class="meta-pills"></div>`;
+        }
+
+        function deviceHTML(id, battery, storage, network) {
             const safeId = escapeHtml(id);
             return `
-                <div class="device-icon"><i class="fa-solid fa-mobile-screen-button"></i></div>
-                <div class="device-info">
-                    <div class="device-name">${safeId}</div>
-                    <div class="device-status"><span class="dot"></span>Connected</div>
+                <div class="device-top">
+                    <div class="device-icon"><i class="fa-solid fa-mobile-screen-button"></i></div>
+                    <div class="device-info">
+                        <div class="device-name">${safeId}</div>
+                        <div class="device-status"><span class="dot"></span>Connected</div>
+                        ${metaPillsHTML(storage, network, battery)}
+                    </div>
+                    ${batteryHTML(battery)}
+                    <button class="btn-revoke" data-id="${safeId}" title="Disconnect device">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
                 </div>
-                ${batteryHTML(battery)}
-                <button class="btn-revoke" data-id="${safeId}" title="Revoke access">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
+                <div class="device-actions">
+                    <div class="action-group">
+                        <button class="btn-action act-send" data-id="${safeId}" title="Send files to phone">
+                            <i class="fa-solid fa-paper-plane"></i><span>Send File</span>
+                        </button>
+                        <button class="btn-action act-photo" data-id="${safeId}" title="Pull latest camera photo to PC">
+                            <i class="fa-solid fa-image"></i><span>Latest Photo</span>
+                        </button>
+                        <button class="btn-action act-shot" data-id="${safeId}" title="Pull latest screenshot to PC">
+                            <i class="fa-solid fa-camera"></i><span>Screenshot</span>
+                        </button>
+                        <button class="btn-action act-clip" data-id="${safeId}" title="Send PC clipboard text to phone">
+                            <i class="fa-solid fa-clipboard"></i><span>Paste to Phone</span>
+                        </button>
+                        <button class="btn-action act-ring" data-id="${safeId}" title="Ring and vibrate phone">
+                            <i class="fa-solid fa-bell"></i><span>Ring</span>
+                        </button>
+                    </div>
+                    <span class="drop-hint">Drop files here</span>
+                </div>
             `;
         }
 
-        function addDevice(id, battery) {
+        function bindDeviceEvents(card, id) {
+            card.querySelector('.btn-revoke').addEventListener('click', function () {
+                revoke(id, this);
+            });
+
+            card.querySelector('.act-send').addEventListener('click', () => {
+                currentUploadTarget = id;
+                document.getElementById('hidden-file-input').click();
+            });
+
+            card.querySelector('.act-ring').addEventListener('click', function () {
+                runQuickAction(id, 'ring', null, this);
+            });
+
+            card.querySelector('.act-photo').addEventListener('click', function () {
+                runQuickAction(id, 'latest_photo', null, this);
+            });
+
+            card.querySelector('.act-shot').addEventListener('click', function () {
+                runQuickAction(id, 'screenshot', null, this);
+            });
+
+            card.querySelector('.act-clip').addEventListener('click', async function () {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (!text) {
+                        showToast('PC clipboard is empty');
+                        return;
+                    }
+                    runQuickAction(id, 'clipboard_set', text, this);
+                } catch (e) {
+                    const manual = prompt('Enter text to send to phone clipboard:');
+                    if (manual) runQuickAction(id, 'clipboard_set', manual, this);
+                }
+            });
+
+            card.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                card.classList.add('dragover');
+            });
+
+            card.addEventListener('dragleave', () => {
+                card.classList.remove('dragover');
+            });
+
+            card.addEventListener('drop', (e) => {
+                e.preventDefault();
+                card.classList.remove('dragover');
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    uploadFilesToDevice(id, e.dataTransfer.files);
+                }
+            });
+        }
+
+        document.getElementById('hidden-file-input').addEventListener('change', function () {
+            if (this.files && this.files.length > 0 && currentUploadTarget) {
+                uploadFilesToDevice(currentUploadTarget, this.files);
+                this.value = '';
+            }
+        });
+
+        async function uploadFilesToDevice(deviceId, fileList) {
+            const formData = new FormData();
+            for (const f of fileList) {
+                formData.append('files', f);
+            }
+            showToast(`Sending ${fileList.length} file(s) to ${deviceId}...`);
+            try {
+                const res = await fetch(`/api/send_to_device/${encodeURIComponent(deviceId)}`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (res.ok && data.status === 'success') {
+                    showToast(`Sent ${data.files.join(', ')} to /sdcard/JarvisShare`);
+                } else {
+                    showToast(`Transfer failed: ${data.detail || 'Error'}`);
+                }
+            } catch (err) {
+                showToast(`Upload error: ${err.message}`);
+            }
+        }
+
+        async function runQuickAction(deviceId, action, payload, btn) {
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch(`/api/action/${encodeURIComponent(deviceId)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, payload })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showToast(data.result || `Action '${action}' completed`);
+                } else {
+                    showToast(`Failed: ${data.detail || 'Action error'}`);
+                }
+            } catch (err) {
+                showToast(`Error: ${err.message}`);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function addDevice(id, battery, storage, network) {
             if (devices.has(id)) {
-                updateBattery(id, battery);
+                updateDeviceTelemetry(id, battery, storage);
                 return;
             }
-            devices.set(id, battery || null);
+            devices.set(id, { battery: battery || null, storage: storage || null, network: network || null });
 
             const empty = document.getElementById('empty-msg');
             if (empty) empty.remove();
@@ -843,23 +1159,34 @@
             const card = document.createElement('div');
             card.className = 'device';
             card.id = `dev-${cssId(id)}`;
-            card.innerHTML = deviceHTML(id, battery);
-            card.querySelector('.btn-revoke').addEventListener('click', function () {
-                revoke(this.dataset.id, this);
-            });
+            card.innerHTML = deviceHTML(id, battery, storage, network);
+            bindDeviceEvents(card, id);
             document.getElementById('device-list').appendChild(card);
             updateStats();
         }
 
-        function updateBattery(id, battery) {
-            devices.set(id, battery);
+        function updateDeviceTelemetry(id, battery, storage) {
+            const prev = devices.get(id) || {};
+            const updated = {
+                battery: battery !== undefined ? battery : prev.battery,
+                storage: storage || prev.storage,
+                network: prev.network
+            };
+            devices.set(id, updated);
+
             const el = document.getElementById(`dev-${cssId(id)}`);
             if (!el) return;
-            const old = el.querySelector('.battery');
-            if (old) {
+            const oldBat = el.querySelector('.battery');
+            if (oldBat) {
                 const tmp = document.createElement('div');
-                tmp.innerHTML = batteryHTML(battery);
-                el.replaceChild(tmp.firstElementChild, old);
+                tmp.innerHTML = batteryHTML(updated.battery);
+                oldBat.replaceWith(tmp.firstElementChild);
+            }
+            const oldPills = el.querySelector('.meta-pills');
+            if (oldPills) {
+                const tmpP = document.createElement('div');
+                tmpP.innerHTML = metaPillsHTML(updated.storage, updated.network, updated.battery);
+                oldPills.replaceWith(tmpP.firstElementChild);
             }
             updateStats();
         }
@@ -891,7 +1218,8 @@
             document.getElementById('stat-devices').innerText = devices.size;
 
             let sum = 0, count = 0;
-            devices.forEach(b => {
+            devices.forEach(info => {
+                const b = info ? info.battery : null;
                 if (b && typeof b.level === 'number' && b.level >= 0) {
                     sum += b.level;
                     count++;
@@ -948,30 +1276,54 @@
             cb();
         }
 
+        const banner = document.getElementById('transfer-banner');
+        const tTitle = document.getElementById('transfer-title');
+        const tPct = document.getElementById('transfer-pct');
+        const tFill = document.getElementById('transfer-fill');
+
         const wsUrl = `ws://${window.location.hostname}:${port}/ws/ui`;
         let socket;
 
         function connectWS() {
             socket = new WebSocket(wsUrl);
 
-            socket.onopen = () => console.log('[UI] Connected');
+            socket.onopen = () => {
+                document.getElementById('stat-status').innerText = 'Online';
+            };
 
             socket.onmessage = (e) => {
                 const data = JSON.parse(e.data);
                 if (data.type === 'init') {
-                    data.devices.forEach(d => addDevice(d.id, d.battery));
+                    data.devices.forEach(d => addDevice(d.id, d.battery, d.storage, d.network));
                     updateStats();
                 } else if (data.type === 'device_connected') {
-                    addDevice(data.device_id, data.battery);
+                    addDevice(data.device_id, data.battery, data.storage, data.network);
+                    showToast(`Connected: ${data.device_id}`);
                 } else if (data.type === 'device_disconnected') {
                     removeDevice(data.device_id);
+                    showToast(`Disconnected: ${data.device_id}`);
                 } else if (data.type === 'battery_update') {
-                    updateBattery(data.device_id, data.battery);
+                    updateDeviceTelemetry(data.device_id, data.battery, data.storage);
+                } else if (data.type === 'transfer_start') {
+                    banner.classList.add('active');
+                    tTitle.innerText = `${data.direction === 'pc_to_mobile' ? 'Sending' : 'Receiving'}: ${data.filename}`;
+                    tPct.innerText = '0%';
+                    tFill.style.width = '0%';
+                } else if (data.type === 'transfer_progress') {
+                    banner.classList.add('active');
+                    tTitle.innerText = `${data.direction === 'pc_to_mobile' ? 'Sending' : 'Receiving'}: ${data.filename}`;
+                    tPct.innerText = `${data.percent}%`;
+                    tFill.style.width = `${data.percent}%`;
+                } else if (data.type === 'transfer_complete') {
+                    tPct.innerText = '100%';
+                    tFill.style.width = '100%';
+                    showToast(`Transfer complete: ${data.filename}`);
+                    setTimeout(() => banner.classList.remove('active'), 1800);
                 }
             };
 
             socket.onclose = () => {
-                console.warn('[UI] Disconnected — retrying in 2s');
+                document.getElementById('stat-status').innerText = 'Reconnecting';
                 setTimeout(connectWS, 2000);
             };
 

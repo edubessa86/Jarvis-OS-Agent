@@ -216,7 +216,8 @@ def handle_python_code(python_cmd: dict) -> str:
 @with_observation
 def handle_mobile_action(mobile_cmd: dict) -> str:
     command = mobile_cmd.get('termux_command')
-    if not command: return "Observation: Mobile action missing 'termux_command' parameter."
+    if not command:
+        return "Observation: Mobile action missing 'termux_command' parameter."
 
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     state_file = os.path.join(base_dir, "Data", "SessionCookies", "connected_devices.json")
@@ -236,18 +237,26 @@ def handle_mobile_action(mobile_cmd: dict) -> str:
     if not target_device or target_device not in active_devices:
         target_device = active_devices[0]
 
+    cmd_timeout = float(mobile_cmd.get('timeout', 65.0))
     logger.info(f"Agent Sending Mobile Command to {target_device}: {command}")
-    
+
     url = "http://127.0.0.1:8090/api/execute"
-    payload = {"target_device": target_device, "command": command}
+    payload = {"target_device": target_device, "command": command, "timeout": cmd_timeout}
 
     try:
-        response = requests.post(url, json=payload, timeout=12)
+        response = requests.post(url, json=payload, timeout=cmd_timeout + 5.0)
         if response.status_code == 200:
-            return f"Observation: {response.json()}"
+            data = response.json()
+            if data.get("error"):
+                return f"Observation: [ERROR] Mobile execution error -> {data['error']}"
+            returncode = data.get("returncode", 0)
+            result_output = data.get("result", "")
+            if returncode != 0:
+                return f"Observation: [FAILED] Command exited with code {returncode} -> {result_output}"
+            return f"Observation: {result_output if result_output else 'Command executed successfully on mobile.'}"
         return f"Observation: [ERROR] Bridge returned status {response.status_code} - {response.text}"
     except Exception as e:
-         return f"Observation: [ERROR] Mobile Bridge Connection Failed -> {e}"
+        return f"Observation: [ERROR] Mobile Bridge Connection Failed -> {e}"
 
 @with_observation
 def handle_file_transfer(transfer_cmd: dict) -> str:
@@ -275,64 +284,47 @@ def handle_file_transfer(transfer_cmd: dict) -> str:
     if not device_id or device_id not in active_devices:
         device_id = active_devices[0]
 
-    def get_local_ip():
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except Exception:
-            return "127.0.0.1"
-
-    pc_ip = get_local_ip()
-    url = "http://127.0.0.1:8090/api/execute"
-    pc_share = os.path.join(os.path.expanduser("~"), "Documents", "Jarvis", "JarvisShare")
+    normalized_paths = []
+    for p in file_paths:
+        p_clean = str(p).strip()
+        low = p_clean.lower()
+        if direction == 'mobile_to_pc' and low in ("latest_photo", "last_photo", "__latest_photo__"):
+            normalized_paths.append("__latest_photo__")
+        elif direction == 'mobile_to_pc' and low in ("latest_screenshot", "last_screenshot", "screenshot", "__latest_screenshot__"):
+            normalized_paths.append("__latest_screenshot__")
+        elif direction == 'pc_to_mobile':
+            normalized_paths.append(os.path.abspath(p_clean.replace("\\", "/")))
+        else:
+            normalized_paths.append(p_clean)
 
     if direction == 'pc_to_mobile':
-        missing = [p for p in file_paths if not os.path.exists(p)]
+        missing = [p for p in normalized_paths if not os.path.isfile(p)]
         if missing:
             return f"Observation: [ERROR] Files not found on PC: {missing}"
 
-        staging_dir = os.path.join(base_dir, "Data", "Staging")
-        os.makedirs(staging_dir, exist_ok=True)
+    url = "http://127.0.0.1:8090/api/transfer"
+    http_timeout = max(65.0, 25.0 * len(normalized_paths))
+    payload = {
+        "direction": direction,
+        "device_id": device_id,
+        "file_paths": normalized_paths,
+    }
 
-        filenames = []
-        for p in file_paths:
-            name = os.path.basename(p)
-            shutil.copy2(p, os.path.join(staging_dir, name))
-            filenames.append(name)
-
-        download_chain = " && ".join(
-            f"curl -s -o '/sdcard/JarvisShare/{name}' 'http://{pc_ip}:8090/api/download/{name}'"
-            for name in filenames
+    try:
+        response = requests.post(url, json=payload, timeout=http_timeout)
+        if response.status_code != 200:
+            return f"Observation: [ERROR] Transfer failed (HTTP {response.status_code}) -> {response.text}"
+        data = response.json()
+        if data.get("status") != "success":
+            return f"Observation: [ERROR] Transfer failed -> {data.get('error', data)}"
+        transferred_files = data.get("files", [])
+        destination = data.get("destination", "")
+        return (
+            f"Observation: Successfully transferred {len(transferred_files)} file(s) "
+            f"({direction}) with {device_id}. Destination: {destination} | Files: {', '.join(transferred_files)}"
         )
-        cmd = f"mkdir -p /sdcard/JarvisShare && {download_chain} && termux-toast 'Received {len(filenames)} files'"
-
-        try:
-            http_timeout = max(30, 10 * len(filenames))
-            response = requests.post(url, json={"target_device": device_id, "command": cmd}, timeout=http_timeout)
-            if response.status_code == 200:
-                return f"Observation: All {len(filenames)} files sent to {device_id} in /sdcard/JarvisShare/ -> {', '.join(filenames)}"
-            return f"Observation: [ERROR] Transfer failed -> {response.text}"
-        except Exception as e:
-            return f"Observation: [ERROR] Connection Failed -> {e}"
-
-    elif direction == 'mobile_to_pc':
-        upload_flags = " ".join(f"-F \"files=@{p}\"" for p in file_paths)
-        cmd = f"curl -s {upload_flags} \"http://{pc_ip}:8090/api/upload_batch\" && termux-toast \"Sent {len(file_paths)} files to PC\""
-
-        try:
-            http_timeout = max(30, 10 * len(file_paths))
-            response = requests.post(url, json={"target_device": device_id, "command": cmd}, timeout=http_timeout)
-            if response.status_code == 200:
-                names = [os.path.basename(p) for p in file_paths]
-                return f"Observation: All {len(names)} files transferred from {device_id} to PC at {pc_share} -> {', '.join(names)}"
-            return f"Observation: [ERROR] Transfer failed -> {response.text}"
-        except Exception as e:
-            return f"Observation: [ERROR] Connection Failed -> {e}"
-
-    return "Observation: Unknown direction."
+    except Exception as e:
+        return f"Observation: [ERROR] File Transfer Connection Failed -> {e}"
 
 @with_observation
 def handle_email_action(email_action: dict) -> str:
