@@ -763,8 +763,8 @@ Facts are stored with weights that decay over time. Recent interests outrank sta
 | `jarvis logout --mail` | Revoke Gmail tokens |
 | `jarvis logout --calendar` | Revoke Calendar tokens |
 | `jarvis logout --all` | Revoke everything |
-| `jarvis bot --activate` | Configure and activate the remote Telegram bot |
-| `jarvis bot --deactivate` | Revoke and offline the remote bot |
+| `jarvis bot --activate` | Configure and activate the remote Telegram bot (Jarvis must be OFF) |
+| `jarvis bot --deactivate` | Revoke and offline the remote bot (Jarvis must be OFF) |
 | `jarvis bot --status` | Show live bot status |
 | `jarvis memory --clear` | Purge contextual memory (keeps active sessions) |
 | `jarvis reset --hard` | **FACTORY RESET** — wipes memory, vectors, sessions |
