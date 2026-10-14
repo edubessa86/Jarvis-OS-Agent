@@ -11,8 +11,9 @@ import urllib.parse
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -30,6 +31,7 @@ try:
 except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "python-multipart"])
+    import multipart
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if PROJECT_ROOT not in sys.path:
@@ -43,6 +45,7 @@ device_meta = {}
 ui_clients = []
 pending_requests = {}
 registered_files = {}
+FILE_REGISTRY_TTL = 3600
 
 STATE_FILE = os.path.join(PROJECT_ROOT, "Data", "SessionCookies", "connected_devices.json")
 USER_HOME = os.path.expanduser("~")
@@ -91,12 +94,25 @@ class QuickActionRequest(BaseModel):
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(2)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if ip and not ip.startswith("127."):
+            return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        _, _, ips = socket.gethostbyname_ex(hostname)
+        for ip in ips:
+            if ip and not ip.startswith("127."):
+                return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
 
 
 def update_state_file():
@@ -123,7 +139,7 @@ def serialize_devices():
 
 async def broadcast_ui(message: dict):
     dead = []
-    for c in ui_clients:
+    for c in list(ui_clients):
         try:
             await c.send_json(message)
         except Exception:
@@ -131,6 +147,23 @@ async def broadcast_ui(message: dict):
     for c in dead:
         if c in ui_clients:
             ui_clients.remove(c)
+
+
+def cleanup_registered_files():
+    now = time.time()
+    expired = [
+        token for token, info in registered_files.items()
+        if now - info.get("created_at", 0) > FILE_REGISTRY_TTL
+    ]
+    for token in expired:
+        info = registered_files.pop(token, None)
+        if info:
+            path = info.get("path", "")
+            if path.startswith(STAGING_DIR) and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
 
 def resolve_unique_save_path(directory: str, filename: str) -> str:
@@ -161,11 +194,15 @@ async def send_device_request(device_id: str, payload: dict, timeout: float = 90
         await ws.send_json(payload)
     except Exception as e:
         pending_requests.pop(req_id, None)
+        if not future.done():
+            future.cancel()
         raise HTTPException(status_code=500, detail=f"Failed to send payload to device: {e}")
 
     try:
         return await asyncio.wait_for(future, timeout=timeout)
     except asyncio.TimeoutError:
+        if not future.done():
+            future.cancel()
         return {"error": f"Timeout: Device did not respond in {int(timeout)} seconds.", "returncode": -1}
     finally:
         pending_requests.pop(req_id, None)
@@ -182,6 +219,7 @@ async def health_check():
 
 @app.post("/api/register_files")
 async def register_files_for_download(req: RegisterFilesRequest):
+    cleanup_registered_files()
     items = []
     missing = []
     for p in req.file_paths:
@@ -245,7 +283,7 @@ async def download_file(identifier: str):
         try:
             with open(target_path, "rb") as f:
                 while True:
-                    chunk = f.read(chunk_size)
+                    chunk = await run_in_threadpool(f.read, chunk_size)
                     if not chunk:
                         break
                     sent += len(chunk)
@@ -288,15 +326,19 @@ async def download_file(identifier: str):
 async def _save_uploaded_stream(upload: UploadFile) -> str:
     save_path = resolve_unique_save_path(PC_SHARE_DIR, upload.filename or "shared_file")
     filename = os.path.basename(save_path)
+    total_size = upload.size if upload.size else 0
+
     await broadcast_ui({
         "type": "transfer_start",
         "direction": "mobile_to_pc",
         "filename": filename,
-        "total": upload.size or 0,
+        "total": total_size,
     })
+
     written = 0
     last_emit = 0.0
     chunk_size = 256 * 1024
+
     with open(save_path, "wb") as buffer:
         while True:
             chunk = await upload.read(chunk_size)
@@ -307,15 +349,19 @@ async def _save_uploaded_stream(upload: UploadFile) -> str:
             now = time.time()
             if now - last_emit > 0.25:
                 last_emit = now
-                pct = int((written / upload.size) * 100) if upload.size else 50
+                if total_size > 0:
+                    pct = int((written / total_size) * 100)
+                else:
+                    pct = 0
                 await broadcast_ui({
                     "type": "transfer_progress",
                     "direction": "mobile_to_pc",
                     "filename": filename,
                     "percent": min(99, pct),
                     "transferred": written,
-                    "total": upload.size or written,
+                    "total": total_size or written,
                 })
+
     await broadcast_ui({
         "type": "transfer_complete",
         "direction": "mobile_to_pc",
@@ -356,6 +402,7 @@ async def upload_batch(files: List[UploadFile] = File(...)):
 async def send_files_from_ui_to_device(device_id: str, files: List[UploadFile] = File(...)):
     if device_id not in devices:
         raise HTTPException(status_code=404, detail=f"Device '{device_id}' offline.")
+    cleanup_registered_files()
     pc_ip = get_local_ip()
     download_items = []
     temp_paths = []
@@ -363,14 +410,20 @@ async def send_files_from_ui_to_device(device_id: str, files: List[UploadFile] =
         for upload in files:
             safe_name = os.path.basename(upload.filename or f"file_{int(time.time())}")
             temp_path = os.path.join(STAGING_DIR, f"{uuid.uuid4().hex}_{safe_name}")
+            written = 0
             with open(temp_path, "wb") as buffer:
-                shutil.copyfileobj(upload.file, buffer)
+                while True:
+                    chunk = await upload.read(256 * 1024)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
+                    written += len(chunk)
             temp_paths.append(temp_path)
             token = uuid.uuid4().hex
             registered_files[token] = {
                 "path": temp_path,
                 "filename": safe_name,
-                "size": os.path.getsize(temp_path),
+                "size": written,
                 "created_at": time.time(),
             }
             download_items.append({
@@ -384,19 +437,16 @@ async def send_files_from_ui_to_device(device_id: str, files: List[UploadFile] =
             {"type": "pull_files", "files": download_items},
             timeout=timeout,
         )
+        if resp.get("returncode", 0) != 0 or resp.get("error"):
+            raise HTTPException(status_code=500, detail=resp.get("error") or resp.get("result") or "Transfer failed")
+        return {"status": "success", "result": resp.get("result"), "files": [i["filename"] for i in download_items]}
+    finally:
         for p in temp_paths:
             if os.path.exists(p):
                 try:
                     os.remove(p)
                 except Exception:
                     pass
-        if resp.get("returncode", 0) != 0 or resp.get("error"):
-            raise HTTPException(status_code=500, detail=resp.get("error") or resp.get("result") or "Transfer failed")
-        return {"status": "success", "result": resp.get("result"), "files": [i["filename"] for i in download_items]}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/transfer")
@@ -405,6 +455,7 @@ async def handle_structured_transfer(req: TransferRequest):
         raise HTTPException(status_code=404, detail="No mobile device connected.")
     target_device = req.device_id if req.device_id in devices else next(iter(devices.keys()))
     pc_ip = get_local_ip()
+    cleanup_registered_files()
 
     if req.direction == "pc_to_mobile":
         missing = [p for p in req.file_paths if not os.path.isfile(p)]
@@ -533,9 +584,9 @@ async def trigger_quick_action(device_id: str, req: QuickActionRequest):
 async def render_dashboard(request: Request):
     ip_address = get_local_ip()
     return templates.TemplateResponse(
-        request,
-        "dashboard.html",
-        {"ip_address": ip_address, "port": PORT},
+        request=request,
+        name="dashboard.html",
+        context={"ip_address": ip_address, "port": PORT},
     )
 
 
@@ -561,11 +612,7 @@ async def get_qr():
     )
 
 
-@app.get("/api/setup", response_class=PlainTextResponse)
-async def get_setup_script(request: Request):
-    ip_address = request.url.hostname or get_local_ip()
-
-    script = f'''import asyncio
+SETUP_SCRIPT_TEMPLATE = r'''import asyncio
 import json
 import os
 import shutil
@@ -574,12 +621,10 @@ import subprocess
 import sys
 import time
 import urllib.request
-import urllib.error
 import uuid
-import mimetypes
 
-SERVER_IP = "{ip_address}"
-SERVER_PORT = {PORT}
+SERVER_IP = "__SERVER_IP__"
+SERVER_PORT = __SERVER_PORT__
 
 try:
     import websockets
@@ -614,7 +659,7 @@ def setup_environment():
 
     share_uploader = os.path.join(home, ".jarvis_share_upload.py")
     uploader_code = """import os, sys, uuid, urllib.request
-SERVER = "http://""" + SERVER_IP + """:""" + str(SERVER_PORT) + """"
+SERVER = "http://__SERVER_IP__:__SERVER_PORT__"
 
 def upload_file(filepath):
     if not os.path.isfile(filepath):
@@ -622,30 +667,30 @@ def upload_file(filepath):
         return
     filename = os.path.basename(filepath)
     boundary = uuid.uuid4().hex
-    os.system(f"termux-toast 'Sending {{filename}} to Jarvis PC...'")
+    os.system(f"termux-toast 'Sending {filename} to Jarvis PC...'")
     try:
         with open(filepath, "rb") as f:
             file_data = f.read()
         header = (
-            f"--{{boundary}}\\r\\n"
-            f'Content-Disposition: form-data; name="file"; filename="{{filename}}"\\r\\n'
-            f"Content-Type: application/octet-stream\\r\\n\\r\\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
         ).encode("utf-8")
-        footer = f"\\r\\n--{{boundary}}--\\r\\n".encode("utf-8")
+        footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
         body = header + file_data + footer
         req = urllib.request.Request(
-            f"{{SERVER}}/api/upload",
+            f"{SERVER}/api/upload",
             data=body,
-            headers={{"Content-Type": f"multipart/form-data; boundary={{boundary}}"}},
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             if resp.status == 200:
-                os.system(f"termux-toast 'Sent {{filename}} to Jarvis PC!'")
+                os.system(f"termux-toast 'Sent {filename} to Jarvis PC!'")
             else:
-                os.system(f"termux-toast 'Upload failed: HTTP {{resp.status}}'")
+                os.system(f"termux-toast 'Upload failed: HTTP {resp.status}'")
     except Exception as e:
-        os.system(f"termux-toast 'Jarvis Upload Error: {{e}}'")
+        os.system(f"termux-toast 'Jarvis Upload Error: {e}'")
 
 if __name__ == "__main__":
     for arg in sys.argv[1:]:
@@ -656,7 +701,7 @@ if __name__ == "__main__":
             f.write(uploader_code)
         editor_hook = os.path.join(bin_dir, "termux-file-editor")
         with open(editor_hook, "w", encoding="utf-8") as f:
-            f.write(f"python {{share_uploader}} \\"$@\\"\\n")
+            f.write(f"python {share_uploader} \"$@\"\n")
         os.chmod(editor_hook, 0o755)
     except Exception:
         pass
@@ -672,7 +717,7 @@ def get_device_name():
     elif model and model.lower() not in ("", "unknown"):
         base = model
         if brand and brand.lower() not in ("", "unknown") and not model.lower().startswith(brand.lower()):
-            base = f"{{brand}} {{model}}"
+            base = f"{brand} {model}"
     else:
         hn = ""
         try:
@@ -686,7 +731,7 @@ def get_device_name():
     try:
         aid = _run_sync(["settings", "get", "secure", "android_id"], timeout=2)
         if aid and len(aid) >= 4 and "Failure" not in aid:
-            base = f"{{base}}_{{aid[:4]}}"
+            base = f"{base}_{aid[:4]}"
     except Exception:
         pass
 
@@ -700,11 +745,11 @@ def get_battery():
         level = int(data.get("percentage", -1))
         if level < 0:
             return None
-        return {{
+        return {
             "level": level,
             "charging": data.get("status") in ("CHARGING", "FULL"),
             "temperature": data.get("temperature"),
-        }}
+        }
     except Exception:
         return None
 
@@ -715,7 +760,7 @@ def get_storage():
         usage = shutil.disk_usage(target)
         free_gb = round(usage.free / (1024 ** 3), 1)
         total_gb = round(usage.total / (1024 ** 3), 1)
-        return {{"free_gb": free_gb, "total_gb": total_gb}}
+        return {"free_gb": free_gb, "total_gb": total_gb}
     except Exception:
         return None
 
@@ -726,7 +771,7 @@ def get_network_info():
         s.connect((SERVER_IP, SERVER_PORT))
         ip = s.getsockname()[0]
         s.close()
-        return {{"ip": ip}}
+        return {"ip": ip}
     except Exception:
         return None
 
@@ -784,22 +829,22 @@ def _resolve_special_mobile_path(token_or_path: str) -> str:
 def _upload_single_file(filepath: str, upload_url: str):
     real_path = _resolve_special_mobile_path(filepath)
     if not os.path.isfile(real_path):
-        raise FileNotFoundError(f"File not found on phone: {{real_path}}")
+        raise FileNotFoundError(f"File not found on phone: {real_path}")
     filename = os.path.basename(real_path)
     boundary = uuid.uuid4().hex
     with open(real_path, "rb") as f:
         file_bytes = f.read()
     header = (
-        f"--{{boundary}}\\r\\n"
-        f'Content-Disposition: form-data; name="file"; filename="{{filename}}"\\r\\n'
-        f"Content-Type: application/octet-stream\\r\\n\\r\\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode("utf-8")
-    footer = f"\\r\\n--{{boundary}}--\\r\\n".encode("utf-8")
+    footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
     body = header + file_bytes + footer
     req = urllib.request.Request(
         upload_url,
         data=body,
-        headers={{"Content-Type": f"multipart/form-data; boundary={{boundary}}"}},
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -812,11 +857,11 @@ async def telemetry_loop(ws):
         b = await asyncio.to_thread(get_battery)
         s = await asyncio.to_thread(get_storage)
         try:
-            await ws.send(json.dumps({{
+            await ws.send(json.dumps({
                 "type": "battery_update",
                 "battery": b,
                 "storage": s,
-            }}))
+            }))
         except Exception:
             return
 
@@ -828,12 +873,12 @@ async def handle_ws_message(ws, data: dict):
     if msg_type == "command":
         cmd = data.get("command", "")
         result, code = await run_shell_command(cmd)
-        await ws.send(json.dumps({{
+        await ws.send(json.dumps({
             "type": "response",
             "req_id": req_id,
             "result": result,
             "returncode": code,
-        }}))
+        }))
 
     elif msg_type == "pull_files":
         files = data.get("files", [])
@@ -842,21 +887,21 @@ async def handle_ws_message(ws, data: dict):
         for item in files:
             url = item.get("url")
             name = os.path.basename(item.get("filename") or "file")
-            dest = f"/sdcard/JarvisShare/{{name}}"
+            dest = f"/sdcard/JarvisShare/{name}"
             try:
                 await asyncio.to_thread(_download_single_file, url, dest)
                 saved.append(dest)
             except Exception as e:
-                errors.append(f"{{name}}: {{e}}")
+                errors.append(f"{name}: {e}")
         if saved:
-            await run_shell_command(f"termux-toast 'Jarvis: Received {{len(saved)}} file(s)'", timeout=5)
-        await ws.send(json.dumps({{
+            await run_shell_command(f"termux-toast 'Jarvis: Received {len(saved)} file(s)'", timeout=5)
+        await ws.send(json.dumps({
             "type": "response",
             "req_id": req_id,
-            "result": f"Saved {{len(saved)}} files to /sdcard/JarvisShare" if not errors else "; ".join(errors),
+            "result": f"Saved {len(saved)} files to /sdcard/JarvisShare" if not errors else "; ".join(errors),
             "saved_files": saved,
             "returncode": 0 if not errors else 1,
-        }}))
+        }))
 
     elif msg_type == "push_files":
         paths = data.get("file_paths", [])
@@ -870,14 +915,14 @@ async def handle_ws_message(ws, data: dict):
             except Exception as e:
                 errors.append(str(e))
         if uploaded:
-            await run_shell_command(f"termux-toast 'Jarvis: Sent {{len(uploaded)}} file(s) to PC'", timeout=5)
-        await ws.send(json.dumps({{
+            await run_shell_command(f"termux-toast 'Jarvis: Sent {len(uploaded)} file(s) to PC'", timeout=5)
+        await ws.send(json.dumps({
             "type": "response",
             "req_id": req_id,
-            "result": f"Uploaded {{len(uploaded)}} files: {{', '.join(uploaded)}}" if not errors else "; ".join(errors),
+            "result": f"Uploaded {len(uploaded)} files: {', '.join(uploaded)}" if not errors else "; ".join(errors),
             "saved_files": uploaded,
             "returncode": 0 if not errors else 1,
-        }}))
+        }))
 
     elif msg_type == "clipboard_set":
         text = data.get("text", "")
@@ -889,27 +934,27 @@ async def handle_ws_message(ws, data: dict):
         )
         await proc.communicate(input=text.encode("utf-8"))
         await run_shell_command("termux-toast 'Clipboard synced from Jarvis PC'", timeout=4)
-        await ws.send(json.dumps({{
+        await ws.send(json.dumps({
             "type": "response",
             "req_id": req_id,
             "result": "Clipboard set on mobile device.",
             "returncode": 0,
-        }}))
+        }))
 
 
 async def connect_jarvis():
-    uri = f"ws://{{SERVER_IP}}:{{SERVER_PORT}}/ws"
+    uri = f"ws://{SERVER_IP}:{SERVER_PORT}/ws"
     device_id = await asyncio.to_thread(get_device_name)
-    print(f"Connecting to Jarvis at {{uri}}...")
+    print(f"Connecting to Jarvis at {uri}...")
     async with websockets.connect(uri, ping_interval=20, ping_timeout=20, max_size=None) as websocket:
-        print(f"Connected as: {{device_id}} (Android Share -> Termux enabled)")
-        await websocket.send(json.dumps({{
+        print(f"Connected as: {device_id} (Android Share -> Termux enabled)")
+        await websocket.send(json.dumps({
             "type": "handshake",
             "device_id": device_id,
             "battery": await asyncio.to_thread(get_battery),
             "storage": await asyncio.to_thread(get_storage),
             "network": await asyncio.to_thread(get_network_info),
-        }}))
+        }))
         t_task = asyncio.create_task(telemetry_loop(websocket))
         try:
             while True:
@@ -944,6 +989,12 @@ if __name__ == "__main__":
         pass
     asyncio.run(main_loop())
 '''
+
+
+@app.get("/api/setup", response_class=PlainTextResponse)
+async def get_setup_script(request: Request):
+    ip_address = get_local_ip()
+    script = SETUP_SCRIPT_TEMPLATE.replace("__SERVER_IP__", ip_address).replace("__SERVER_PORT__", str(PORT))
     return script
 
 
@@ -972,6 +1023,14 @@ async def websocket_endpoint(websocket: WebSocket):
         handshake = await websocket.receive_json()
         if handshake.get("type") == "handshake":
             device_id = handshake.get("device_id")
+
+            old_ws = devices.get(device_id)
+            if old_ws is not None and old_ws is not websocket:
+                try:
+                    await old_ws.close(code=1000, reason="Replaced by new connection")
+                except Exception:
+                    pass
+
             devices[device_id] = websocket
             device_meta[device_id] = {
                 "battery": handshake.get("battery"),
@@ -999,8 +1058,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
             if msg_type == "response":
                 req_id = data.get("req_id")
-                if req_id in pending_requests and not pending_requests[req_id].done():
-                    pending_requests[req_id].set_result(data)
+                fut = pending_requests.get(req_id)
+                if fut is not None and not fut.done():
+                    fut.set_result(data)
 
             elif msg_type == "battery_update":
                 battery = data.get("battery")
