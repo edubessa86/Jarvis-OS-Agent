@@ -21,6 +21,7 @@ _mobile_bridge_process = None
 _rag_engine_initialized = False
 _rag_dashboard_active = False
 _rag_engine_init_started = False
+_telegram_remote_init_started = False
 
 def start_agent_panel():
     global _panel_process
@@ -251,11 +252,25 @@ def is_indexer_dashboard_running() -> bool:
 def is_rag_engine_init_started() -> bool:
     return _rag_engine_init_started
 
+def is_telegram_remote_init_started() -> bool:
+    return _telegram_remote_init_started
+
+def is_stt_mic_available() -> bool:
+    try:
+        from core.voice import stt
+        return bool(getattr(stt.engine, "mic_available", False))
+    except Exception:
+        return False
+
 def start_telegram_remote_service():
+    global _telegram_remote_init_started
+    _telegram_remote_init_started = True
     try:
         session_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Data", "SessionCookies")
         token_file = os.path.join(session_dir, "telegram_bot_token.enc")
         if not os.path.exists(token_file):
+            return
+        if is_telegram_remote_running():
             return
         if start_telegram_remote_listener():
             logging.info("Telegram Remote Bot Service started successfully.")
@@ -263,6 +278,8 @@ def start_telegram_remote_service():
         logging.error(f"Telegram Remote Bot Service start failed: {e}")
 
 def stop_telegram_remote_service():
+    global _telegram_remote_init_started
+    _telegram_remote_init_started = False
     try:
         stop_telegram_remote_listener()
     except Exception as e:

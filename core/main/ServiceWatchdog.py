@@ -12,7 +12,9 @@ from core.main.BackgroundServices import (
     is_stt_popup_running,
     is_telegram_remote_service_running,
     is_indexer_dashboard_running,
-    is_rag_engine_init_started
+    is_rag_engine_init_started,
+    is_telegram_remote_init_started,
+    is_stt_mic_available
 )
 
 class ServiceWatchdog:
@@ -41,7 +43,7 @@ class ServiceWatchdog:
                 "retries": 0,
                 "last_restart": 0,
                 "next_retry_time": 0,
-                "has_creds": lambda: True
+                "has_creds": is_stt_mic_available
             },
             "telegram_remote": {
                 "is_running_check": is_telegram_remote_service_running,
@@ -49,7 +51,8 @@ class ServiceWatchdog:
                 "retries": 0,
                 "last_restart": 0,
                 "next_retry_time": 0,
-                "has_creds": lambda: os.path.exists(self._telegram_token_path)
+                "has_creds": lambda: os.path.exists(self._telegram_token_path),
+                "ready_check": is_telegram_remote_init_started
             },
             "indexer_dashboard": {
                 "is_running_check": is_indexer_dashboard_running,
