@@ -622,30 +622,30 @@ def upload_file(filepath):
         return
     filename = os.path.basename(filepath)
     boundary = uuid.uuid4().hex
-    os.system(f"termux-toast 'Sending {filename} to Jarvis PC...'")
+    os.system(f"termux-toast 'Sending {{filename}} to Jarvis PC...'")
     try:
         with open(filepath, "rb") as f:
             file_data = f.read()
         header = (
-            f"--{boundary}\\r\\n"
-            f'Content-Disposition: form-data; name="file"; filename="{filename}"\\r\\n'
+            f"--{{boundary}}\\r\\n"
+            f'Content-Disposition: form-data; name="file"; filename="{{filename}}"\\r\\n'
             f"Content-Type: application/octet-stream\\r\\n\\r\\n"
         ).encode("utf-8")
-        footer = f"\\r\\n--{boundary}--\\r\\n".encode("utf-8")
+        footer = f"\\r\\n--{{boundary}}--\\r\\n".encode("utf-8")
         body = header + file_data + footer
         req = urllib.request.Request(
-            f"{SERVER}/api/upload",
+            f"{{SERVER}}/api/upload",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers={{"Content-Type": f"multipart/form-data; boundary={{boundary}}"}},
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             if resp.status == 200:
-                os.system(f"termux-toast 'Sent {filename} to Jarvis PC!'")
+                os.system(f"termux-toast 'Sent {{filename}} to Jarvis PC!'")
             else:
-                os.system(f"termux-toast 'Upload failed: HTTP {resp.status}'")
+                os.system(f"termux-toast 'Upload failed: HTTP {{resp.status}}'")
     except Exception as e:
-        os.system(f"termux-toast 'Jarvis Upload Error: {e}'")
+        os.system(f"termux-toast 'Jarvis Upload Error: {{e}}'")
 
 if __name__ == "__main__":
     for arg in sys.argv[1:]:
