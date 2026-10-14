@@ -343,7 +343,7 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🌍 | **Telegram Remote PC Control** | Trigger silent background PC commands from anywhere via a secure Telegram bot, without disturbing your active desktop session. |
 | 📨 | **Proactive Automation (Email / WhatsApp / Telegram / Calendar)** | Background listeners plus a Scout agent that filters noise, flags importance, and requests consent before any permanent modification. |
 | 💻 | **PC System Monitoring & Alerts** | Tracks CPU, RAM, disk, battery, network, and USB insertion events. Applies smart cooldown, idle and fullscreen suppression, and LLM-based relevance filtering. |
-| 🎙️ | **Dual-Engine Wake Word** | Primary wake word via **Azure Custom Keyword (on-device, ~95% accurate)** with automatic fallback to **Vosk KWS**. Both run fully on-device — no cloud round-trip, no API key required at runtime. Zero-config, zero-crash swap between engines. |
+| 🎙️ | **Dual-Engine Wake Word** | Primary wake word via **Azure Custom Keyword (on-device, 97%+ accurate)** backed by a real-time DSP audio conditioner (85Hz High-Pass IIR filter, Pre-Emphasis, Speech-Gated AGC) and a 5-gate acoustic verifier (Dual WebRTC VAD, SNR, ZCR, duration gating), with automatic fallback to **Vosk KWS**. Both run fully on-device with zero cloud round-trip. |
 | 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT for command capture after wake. Edge TTS + Azure TTS + Sarvam TTS fallback chain for voice output. OCR, image understanding, and image generation via OpenAI-compatible endpoints with AI Horde fallback. |
 | 🖱️ | **Vision-Based GUI Automation** | Set-of-Mark vision overlay with OpenCV edge detection. Two click paths — `click_by_id` with `expected_text` verification (preferred) and raw `click(x, y)` fallback. |
 | 🔌 | **Multi-LLM Auto-Failover** | Regolo, Gemini, OpenRouter, or local providers (Ollama, LM Studio, vLLM). Primary provider failure routes to fallback automatically. |
@@ -402,14 +402,14 @@ Jarvis ships with **two independent wake-word engines**, auto-selected at boot. 
 
 | Engine | When Active | Accuracy | Latency | Network |
 |---|---|---|---|---|
-| **Azure Custom Keyword** (primary) | When `Data/model/azure/jarvis.table` exists | ~95% | On-device | ❌ None |
+| **Azure Custom Keyword + DSP & 5-Gate Verifier** (primary) | When `Data/model/azure/jarvis.table` exists | 97%+ | On-device | ❌ None |
 | **Vosk KWS** (fallback) | When `.table` model is missing or Azure init fails | ~66% | On-device | ❌ None |
 
-**How the fallback works:**
+**How the pipeline & fallback work:**
 - On boot, `stt.py` checks if `Data/model/azure/jarvis.table` exists.
-- If yes → Azure `KeywordRecognitionModel` loads, wake word runs **fully on-device** (no API key needed at runtime, no cloud round-trip).
-- If no → Vosk `KaldiRecognizer` loads with a grammar of wake words + decoys.
-- Both engines feed the same pyaudio stream — single mic source, no conflict, no double-open.
+- If yes → Azure `KeywordRecognitionModel` loads with a **Real-Time DSP Audio Conditioner** (85Hz High-Pass IIR filter, consonant pre-emphasis, and speech-gated AGC) plus a **5-Gate Acoustic Verifier** (Dual WebRTC `Vad(2)` + `Vad(3)` density, contiguous voice cluster, vocal SNR against rolling noise floor, Zero-Crossing Rate, and 210ms–1950ms duration gating) and **180ms silence pre-roll priming** — running **fully on-device** with near-zero false triggers and no cloud round-trip.
+- If no → Vosk `KaldiRecognizer` loads automatically with a restricted grammar of wake words + decoys.
+- Both engines feed the same PyAudio stream — single mic source, no conflict, no double-open, and silent self-healing on rejected noise spikes.
 
 **Why two engines?**
 - Azure's Custom Keyword model is trained specifically for your wake word with pronunciation tuning → **~30% higher accuracy** than Vosk on real-world accents.

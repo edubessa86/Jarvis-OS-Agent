@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import math
+import array
 import shutil
 import zipfile
 import threading
@@ -9,6 +11,7 @@ import urllib.request
 import pyaudio
 import json
 import webrtcvad
+from collections import deque
 from vosk import Model as VoskModel, KaldiRecognizer, SetLogLevel
 from dotenv import load_dotenv
 
@@ -128,9 +131,20 @@ class UnifiedVoiceAssistant:
         self.azure_recognizer = None
         self.azure_push_stream = None
         self.azure_wake_detected = threading.Event()
+        self.azure_needs_restart = threading.Event()
+        self.azure_matched_text = "jarvis (azure)"
+
+        self.frame_history = deque(maxlen=45)
+        self._hp_prev_x = 0.0
+        self._hp_prev_y = 0.0
+        self._pre_prev_y = 0.0
+        self._noise_floor_rms = 60.0
+        self._agc_gain = 1.2
+        self._last_reset_time = 0.0
 
         try:
             self.vad = webrtcvad.Vad(2)
+            self.strict_vad = webrtcvad.Vad(3)
             self.MAX_SILENCE_TIMEOUT = 1.0
             self.MAX_WAIT_TIMEOUT = 4.0
 
@@ -192,10 +206,181 @@ class UnifiedVoiceAssistant:
         self.vosk_recognizer = KaldiRecognizer(self.vosk_model, self.RATE, grammar)
         logger.info("✅ Vosk wake word engine ENABLED (fallback)")
 
+    def _reset_dsp_state(self):
+        self._hp_prev_x = 0.0
+        self._hp_prev_y = 0.0
+        self._pre_prev_y = 0.0
+        self.frame_history.clear()
+
+    def _analyze_and_condition_audio(self, pcm_data):
+        try:
+            is_speech_v2 = self.vad.is_speech(pcm_data, self.RATE)
+        except Exception:
+            is_speech_v2 = False
+
+        try:
+            is_speech_v3 = self.strict_vad.is_speech(pcm_data, self.RATE)
+        except Exception:
+            is_speech_v3 = False
+
+        samples = array.array("h")
+        samples.frombytes(pcm_data)
+        n_samples = len(samples)
+        if n_samples == 0:
+            return pcm_data
+
+        sum_sq = 0.0
+        zero_crossings = 0
+        prev_raw = samples[0]
+
+        hp_prev_x = self._hp_prev_x
+        hp_prev_y = self._hp_prev_y
+        pre_prev_y = self._pre_prev_y
+        hp_alpha = 0.967
+        pre_coeff = 0.14
+
+        filtered = [0.0] * n_samples
+
+        for i in range(n_samples):
+            x = float(samples[i])
+            sum_sq += x * x
+            if (x >= 0.0 and prev_raw < 0.0) or (x < 0.0 and prev_raw >= 0.0):
+                zero_crossings += 1
+            prev_raw = x
+
+            hp_y = hp_alpha * (hp_prev_y + x - hp_prev_x)
+            hp_prev_x = x
+            hp_prev_y = hp_y
+
+            out_y = hp_y - pre_coeff * pre_prev_y
+            pre_prev_y = hp_y
+            filtered[i] = out_y
+
+        self._hp_prev_x = hp_prev_x
+        self._hp_prev_y = hp_prev_y
+        self._pre_prev_y = pre_prev_y
+
+        raw_rms = math.sqrt(sum_sq / n_samples)
+        zcr = zero_crossings / float(n_samples)
+
+        if not is_speech_v2 and raw_rms < max(450.0, self._noise_floor_rms * 1.8):
+            self._noise_floor_rms = (0.96 * self._noise_floor_rms) + (0.04 * max(25.0, raw_rms))
+
+        if is_speech_v2 or raw_rms > (self._noise_floor_rms * 1.4):
+            if raw_rms > 60.0:
+                desired_gain = 2300.0 / raw_rms
+                desired_gain = max(1.0, min(2.6, desired_gain))
+                self._agc_gain = (0.75 * self._agc_gain) + (0.25 * desired_gain)
+        else:
+            self._agc_gain = (0.90 * self._agc_gain) + (0.10 * 1.0)
+
+        gain = self._agc_gain
+        out_samples = array.array("h", [0] * n_samples)
+        cond_sum_sq = 0.0
+
+        for i in range(n_samples):
+            val = int(filtered[i] * gain)
+            if val > 32767:
+                val = 32767
+            elif val < -32768:
+                val = -32768
+            out_samples[i] = val
+            cond_sum_sq += float(val) * float(val)
+
+        cond_rms = math.sqrt(cond_sum_sq / n_samples)
+        self.frame_history.append((is_speech_v2, is_speech_v3, raw_rms, cond_rms, zcr))
+        return out_samples.tobytes()
+
+    def _extract_duration_ms(self, result):
+        dur = getattr(result, "duration", 0)
+        if hasattr(dur, "total_seconds"):
+            return dur.total_seconds() * 1000.0
+        if isinstance(dur, (int, float)) and dur > 0:
+            if dur > 10000:
+                return float(dur) / 10000.0
+            return float(dur)
+        return 0.0
+
+    def _verify_azure_wake(self, text, duration_ms):
+        now = time.time()
+        if (now - self._last_reset_time) < 0.35:
+            logger.debug("Azure wake rejected: post-reset cooldown active.")
+            return False
+
+        clean_text = (text or "").strip().lower()
+        if clean_text and "jarvis" not in clean_text:
+            logger.debug(f"Azure wake rejected: mismatched keyword text '{clean_text}'.")
+            return False
+
+        if duration_ms > 0.0 and (duration_ms < 210.0 or duration_ms > 1950.0):
+            logger.debug(f"Azure wake rejected: invalid duration {duration_ms:.1f}ms.")
+            return False
+
+        frames = list(self.frame_history)
+        if len(frames) < 6:
+            return True
+
+        v2_count = 0
+        v3_count = 0
+        max_contiguous_v2 = 0
+        current_run = 0
+        gap_allowance = 0
+        speech_rms_values = []
+        speech_zcr_values = []
+
+        for is_v2, is_v3, raw_rms, cond_rms, zcr in frames:
+            if is_v2:
+                v2_count += 1
+                current_run += 1
+                gap_allowance = 0
+                speech_rms_values.append(raw_rms)
+                speech_zcr_values.append(zcr)
+                if current_run > max_contiguous_v2:
+                    max_contiguous_v2 = current_run
+            else:
+                if current_run > 0 and gap_allowance == 0:
+                    gap_allowance = 1
+                else:
+                    current_run = 0
+                    gap_allowance = 0
+            if is_v3:
+                v3_count += 1
+
+        if v2_count < 6 or v3_count < 2 or max_contiguous_v2 < 4:
+            logger.debug(
+                f"Azure wake rejected: insufficient VAD density "
+                f"(v2={v2_count}, v3={v3_count}, run={max_contiguous_v2})."
+            )
+            return False
+
+        if not speech_rms_values:
+            return False
+
+        peak_rms = max(speech_rms_values)
+        mean_rms = sum(speech_rms_values) / len(speech_rms_values)
+        mean_zcr = sum(speech_zcr_values) / len(speech_zcr_values)
+
+        min_peak_required = max(130.0, self._noise_floor_rms * 1.32)
+        min_mean_required = max(85.0, self._noise_floor_rms * 1.12)
+
+        if peak_rms < min_peak_required or mean_rms < min_mean_required:
+            logger.debug(
+                f"Azure wake rejected: low vocal SNR "
+                f"(peak={peak_rms:.1f}, mean={mean_rms:.1f}, floor={self._noise_floor_rms:.1f})."
+            )
+            return False
+
+        if mean_zcr < 0.012 or mean_zcr > 0.46:
+            logger.debug(f"Azure wake rejected: out-of-bounds ZCR ({mean_zcr:.3f}).")
+            return False
+
+        return True
+
     def _start_azure_listening(self):
         if not self.use_azure_wake or self.azure_speechsdk is None:
             return
         try:
+            self._reset_dsp_state()
             audio_format = self.azure_speechsdk.audio.AudioStreamFormat(
                 samples_per_second=self.RATE,
                 bits_per_sample=16,
@@ -211,33 +396,37 @@ class UnifiedVoiceAssistant:
 
             def on_recognized(evt):
                 if evt.result.reason == self.azure_speechsdk.ResultReason.RecognizedKeyword:
-                    logger.info(f"🎯 Azure wake word detected | text='{evt.result.text}'")
-                    self.azure_wake_detected.set()
+                    detected_text = getattr(evt.result, "text", "") or "jarvis"
+                    duration_ms = self._extract_duration_ms(evt.result)
+                    if self._verify_azure_wake(detected_text, duration_ms):
+                        self.azure_matched_text = f"{detected_text} (azure)"
+                        logger.info(
+                            f"🎯 Azure wake word detected | text='{detected_text}' | duration={duration_ms:.0f}ms"
+                        )
+                        self.azure_wake_detected.set()
+                    else:
+                        self.azure_needs_restart.set()
 
             def on_canceled(evt):
                 cancellation = evt.result.cancellation_details
                 logger.debug(f"Azure keyword canceled | reason={cancellation.reason}")
+                if not self.is_awake and not self.azure_wake_detected.is_set():
+                    self.azure_needs_restart.set()
 
             self.azure_recognizer.recognized.connect(on_recognized)
             self.azure_recognizer.canceled.connect(on_canceled)
-            self.azure_recognizer.start_keyword_recognition(self.azure_keyword_model)
             self.azure_wake_detected.clear()
+            self.azure_needs_restart.clear()
+            self.azure_recognizer.start_keyword_recognition(self.azure_keyword_model)
+
+            silence_preroll = b"\x00" * (self.CHUNK * 2 * 6)
+            self.azure_push_stream.write(silence_preroll)
             logger.info("🎧 Azure keyword recognition started.")
         except Exception as e:
             logger.error(f"❌ Azure keyword recognition start failed: {e}")
             self.use_azure_wake = False
 
     def _stop_azure_listening(self):
-        if self.azure_recognizer is not None:
-            try:
-                self.azure_recognizer.stop_keyword_recognition()
-                self.azure_recognizer.recognized.disconnect_all()
-                self.azure_recognizer.canceled.disconnect_all()
-            except Exception as e:
-                logger.debug(f"Azure recognizer stop error: {e}")
-            finally:
-                self.azure_recognizer = None
-
         if self.azure_push_stream is not None:
             try:
                 self.azure_push_stream.close()
@@ -245,6 +434,16 @@ class UnifiedVoiceAssistant:
                 pass
             finally:
                 self.azure_push_stream = None
+
+        if self.azure_recognizer is not None:
+            try:
+                self.azure_recognizer.recognized.disconnect_all()
+                self.azure_recognizer.canceled.disconnect_all()
+                self.azure_recognizer.stop_keyword_recognition()
+            except Exception as e:
+                logger.debug(f"Azure recognizer stop error: {e}")
+            finally:
+                self.azure_recognizer = None
 
     def start(self):
         if not self.mic_available:
@@ -357,9 +556,16 @@ class UnifiedVoiceAssistant:
                     matched_text = ""
 
                     if self.use_azure_wake:
+                        if self.azure_needs_restart.is_set():
+                            self.azure_needs_restart.clear()
+                            self._stop_azure_listening()
+                            self._start_azure_listening()
+
+                        conditioned_pcm = self._analyze_and_condition_audio(pcm_data)
+
                         if self.azure_push_stream is not None:
                             try:
-                                self.azure_push_stream.write(pcm_data)
+                                self.azure_push_stream.write(conditioned_pcm)
                             except Exception as e:
                                 logger.error(f"Azure push stream write failed: {e}")
                                 self._stop_azure_listening()
@@ -369,7 +575,7 @@ class UnifiedVoiceAssistant:
                         if self.azure_wake_detected.is_set():
                             self.azure_wake_detected.clear()
                             triggered = True
-                            matched_text = "jarvis (azure)"
+                            matched_text = self.azure_matched_text
                     else:
                         is_speech = self.vad.is_speech(pcm_data, self.RATE)
 
@@ -414,6 +620,7 @@ class UnifiedVoiceAssistant:
                             else:
                                 logger.warning("⚠️ Deepgram connection failed. Returning to wake word mode.")
                                 self.connection_established = False
+                                self._last_reset_time = time.time()
                                 if self.use_azure_wake:
                                     self._start_azure_listening()
                                 elif self.vosk_recognizer:
@@ -463,6 +670,7 @@ class UnifiedVoiceAssistant:
         self.dg_connection = None
         self.connection_established = False
         self.is_awake = False
+        self._last_reset_time = time.time()
         self._flush_audio_buffer()
 
         if self.vosk_recognizer:
@@ -494,6 +702,7 @@ class UnifiedVoiceAssistant:
             self.dg_connection = None
             self.connection_established = False
 
+        self._last_reset_time = time.time()
         self._flush_audio_buffer()
 
         if self.vosk_recognizer:
@@ -515,7 +724,7 @@ class UnifiedVoiceAssistant:
             self.command_queue.put("")
 
         logger.info("💤 Idle. Waiting for next wake word 'Jarvis'...")
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     def get_command(self, is_retry=False):
         command = None
