@@ -43,6 +43,9 @@ class ContextMemory:
         self.daily_summaries = self._load_daily_summaries()
         self.last_message_date = self._get_last_message_date()
         self.ephemeral = {}
+        self._ephemeral_expiry = {}
+        self._devices_cache = []
+        self._devices_cache_mtime = 0.0
         self.live_feedback_queue = []
         self.current_mode = "General Assistant"
         self.mode_timer = datetime.now()
@@ -98,7 +101,7 @@ class ContextMemory:
             return False
         return True
 
-    def set_pending_confirmation(self, task_data=None, ttl_seconds=60):
+    def set_pending_confirmation(self, task_data=None, ttl_seconds=90):
         with self._lock:
             if self._confirmation_timer:
                 try:
@@ -107,12 +110,14 @@ class ContextMemory:
                     logger.error(f"Error cancelling confirmation timer: {e}")
                 self._confirmation_timer = None
             self.ephemeral["waiting_for_confirmation"] = True
-            if task_data:
+            self.ephemeral.pop("proactive_confirmed", None)
+            if task_data is not None:
                 self.ephemeral["pending_task_data"] = task_data
 
             def _auto_expire():
                 with self._lock:
                     self.ephemeral["waiting_for_confirmation"] = False
+                    self.ephemeral.pop("proactive_confirmed", None)
                     self.ephemeral.pop("pending_task_data", None)
                     self._confirmation_timer = None
 
@@ -129,18 +134,113 @@ class ContextMemory:
                     logger.error(f"Error cancelling confirmation timer: {e}")
                 self._confirmation_timer = None
             self.ephemeral["waiting_for_confirmation"] = False
+            self.ephemeral.pop("proactive_confirmed", None)
             self.ephemeral.pop("pending_task_data", None)
+
+    def consume_pending_confirmation(self):
+        with self._lock:
+            if self._confirmation_timer:
+                try:
+                    self._confirmation_timer.cancel()
+                except Exception as e:
+                    logger.error(f"Error cancelling confirmation timer: {e}")
+                self._confirmation_timer = None
+            self.ephemeral["waiting_for_confirmation"] = False
+            self.ephemeral.pop("proactive_confirmed", None)
+            return self.ephemeral.pop("pending_task_data", None)
+
+    def consume_silent_flag(self) -> bool:
+        with self._lock:
+            return bool(self.ephemeral.pop("force_silent_agentic", False))
+
+    def set_last_artifact(self, key: str, file_path: str, ttl_seconds: int = 600):
+        if not key or not file_path or not str(file_path).strip():
+            return
+        with self._lock:
+            clean_path = str(file_path).strip()
+            self.ephemeral[key] = clean_path
+            self._ephemeral_expiry[key] = time.time() + ttl_seconds
+
+    def _prune_expired_ephemeral(self):
+        now = time.time()
+        with self._lock:
+            expired_keys = [
+                k for k, exp_ts in list(self._ephemeral_expiry.items())
+                if now >= exp_ts
+            ]
+            for k in expired_keys:
+                self._ephemeral_expiry.pop(k, None)
+                self.ephemeral.pop(k, None)
+
+    def sync_connected_devices(self):
+        with self._lock:
+            try:
+                devices_file = Path("Data/SessionCookies/connected_devices.json")
+                if not devices_file.exists():
+                    alt_file = Path(__file__).resolve().parents[3] / "Data" / "SessionCookies" / "connected_devices.json"
+                    if alt_file.exists():
+                        devices_file = alt_file
+
+                if devices_file.exists():
+                    mtime = devices_file.stat().st_mtime
+                    if mtime != self._devices_cache_mtime:
+                        with open(devices_file, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        self._devices_cache = data if isinstance(data, list) else []
+                        self._devices_cache_mtime = mtime
+                else:
+                    self._devices_cache = []
+                    self._devices_cache_mtime = 0.0
+
+                if self._devices_cache:
+                    self.ephemeral["connected_devices"] = list(self._devices_cache)
+                else:
+                    self.ephemeral.pop("connected_devices", None)
+            except Exception as e:
+                logger.warning(f"Failed to sync connected devices: {e}")
+
+    def get_ephemeral_context(self, mode: str = "agentic") -> str:
+        with self._lock:
+            self._prune_expired_ephemeral()
+            self.sync_connected_devices()
+
+            devices = self.ephemeral.get("connected_devices") or []
+            last_img = self.ephemeral.get("last_generated_image")
+            last_shot = self.ephemeral.get("last_screenshot")
+
+            if mode == "fast":
+                lines = []
+                if devices:
+                    lines.append(f"Active Connected Phones: {', '.join(str(d) for d in devices)}")
+                if last_img:
+                    lines.append(f"Last generated image: {last_img}")
+                if last_shot:
+                    lines.append(f"Last screenshot taken: {last_shot}")
+                if not lines:
+                    return ""
+                return "[[RECENT AGENT ACTIVITY]]\n" + "\n".join(lines) + "\n"
+
+            lines = []
+            if devices:
+                lines.append(f"[EPHEMERAL: Active Connected Phones = {', '.join(str(d) for d in devices)}]")
+            if last_img:
+                lines.append(f"[EPHEMERAL: Last generated image = {last_img}]")
+            if last_shot:
+                lines.append(f"[EPHEMERAL: Last screenshot taken = {last_shot}]")
+            return "\n".join(lines)
 
     def add_live_feedback(self, text):
         if text and text.strip():
-            self.live_feedback_queue.append(text.strip())
+            with self._lock:
+                self.live_feedback_queue.append(text.strip())
 
     def get_and_clear_feedback(self):
-        if not self.live_feedback_queue:
-            return ""
-        feedback = " | ".join(self.live_feedback_queue)
-        self.live_feedback_queue.clear()
-        return feedback
+        with self._lock:
+            if not self.live_feedback_queue:
+                return ""
+            feedback = " | ".join(self.live_feedback_queue)
+            self.live_feedback_queue.clear()
+            return feedback
 
     def _load_json(self, file_path, default):
         try:
@@ -497,15 +597,18 @@ Return STRICT JSON exactly in this schema:
             logger.error(f"Pruning timer error: {e}")
 
     def _prune_old_messages(self):
-        if not self.master_history:
-            return
+        with self._lock:
+            if not self.master_history:
+                return
+            history_snapshot = list(self.master_history)
+
         try:
             now = datetime.now()
             raw_cutoff = now - timedelta(days=MEMORY_RAW_RETENTION_DAYS)
             summary_cutoff = now - timedelta(days=MEMORY_SUMMARY_RETENTION_DAYS)
 
             day_groups = {}
-            for msg in self.master_history:
+            for msg in history_snapshot:
                 try:
                     ts = datetime.fromisoformat(msg.get('timestamp', now.isoformat()))
                     if ts < raw_cutoff:
@@ -518,20 +621,21 @@ Return STRICT JSON exactly in this schema:
                 if day_key not in self.daily_summaries and len(msgs) >= MEMORY_SUMMARY_MIN_MESSAGES:
                     self._generate_daily_summary(day_key, msgs)
 
-            filtered_history = []
-            for msg in self.master_history:
-                try:
-                    msg_time = datetime.fromisoformat(msg.get('timestamp', now.isoformat()))
-                    if msg_time >= raw_cutoff:
-                        filtered_history.append(msg)
-                except Exception:
-                    continue
+            with self._lock:
+                filtered_history = []
+                for msg in self.master_history:
+                    try:
+                        msg_time = datetime.fromisoformat(msg.get('timestamp', now.isoformat()))
+                        if msg_time >= raw_cutoff:
+                            filtered_history.append(msg)
+                    except Exception:
+                        continue
 
-            if len(filtered_history) < len(self.master_history):
-                removed = len(self.master_history) - len(filtered_history)
-                self.master_history = filtered_history
-                self._rewrite_history_jsonl(self.master_history_file, self.master_history)
-                logger.info(f"Pruned {removed} raw messages older than {MEMORY_RAW_RETENTION_DAYS} days")
+                if len(filtered_history) < len(self.master_history):
+                    removed = len(self.master_history) - len(filtered_history)
+                    self.master_history = filtered_history
+                    self._rewrite_history_jsonl(self.master_history_file, self.master_history)
+                    logger.info(f"Pruned {removed} raw messages older than {MEMORY_RAW_RETENTION_DAYS} days")
 
             self._prune_old_summaries(summary_cutoff)
         except Exception as e:
@@ -628,13 +732,16 @@ Return STRICT JSON exactly in this schema:
             log_content = []
             apps_opened = metadata.get("apps_opened", [])
             apps_closed = metadata.get("apps_closed", [])
+            files_touched = metadata.get("files_touched", [])
             system_events = metadata.get("system_events", [])
-            if apps_opened or apps_closed or system_events:
+            if apps_opened or apps_closed or files_touched or system_events:
                 log_content.append("  ACTIONS TAKEN:")
                 if apps_opened:
                     log_content.append(f"  - Opened Apps: {', '.join(apps_opened)}")
                 if apps_closed:
                     log_content.append(f"  - Closed Apps: {', '.join(apps_closed)}")
+                if files_touched:
+                    log_content.append(f"  - Files Touched: {', '.join(files_touched)}")
                 for evt in system_events:
                     log_content.append(f"  - System: {evt}")
             if log_content:
@@ -646,27 +753,45 @@ Return STRICT JSON exactly in this schema:
         return block
 
     def get_fast_history_context(self):
-        if not self.master_history:
-            return "No recent conversation."
+        with self._lock:
+            if not self.master_history:
+                return "No recent conversation."
+            recent_entries = list(self.master_history[-10:])
         try:
             history_str = []
-            for entry in self.master_history[-10:]:
+            for entry in recent_entries:
                 time_str = datetime.fromisoformat(entry.get('timestamp', datetime.now().isoformat())).strftime('%H:%M')
                 if entry.get('role') == "CONVERSATION":
-                    history_str.append(f"[{time_str}] {entry.get('message', '')}")
+                    line = f"[{time_str}] {entry.get('message', '')}"
                 else:
-                    history_str.append(f"[{time_str}] {entry.get('role', 'UNKNOWN')}: {entry.get('message', '')}")
+                    line = f"[{time_str}] {entry.get('role', 'UNKNOWN')}: {entry.get('message', '')}"
+                metadata = entry.get('metadata', {})
+                if isinstance(metadata, dict):
+                    meta_parts = []
+                    if metadata.get("apps_opened"):
+                        meta_parts.append(f"Opened: {', '.join(metadata['apps_opened'])}")
+                    if metadata.get("apps_closed"):
+                        meta_parts.append(f"Closed: {', '.join(metadata['apps_closed'])}")
+                    if metadata.get("files_touched"):
+                        meta_parts.append(f"Files: {', '.join(metadata['files_touched'])}")
+                    if metadata.get("system_events"):
+                        meta_parts.append(f"Events: {'; '.join(metadata['system_events'][:3])}")
+                    if meta_parts:
+                        line += f" [Actions: {' | '.join(meta_parts)}]"
+                history_str.append(line)
             return "\n".join(history_str)
         except Exception as e:
             logger.error(f"Context retrieval error: {e}")
             return "Error retrieving history."
 
     def get_agentic_fast_context(self):
-        if not self.master_history:
-            return "<Recent_Context>\nNo recent conversation.\n</Recent_Context>"
+        with self._lock:
+            if not self.master_history:
+                return "<Recent_Context>\nNo recent conversation.\n</Recent_Context>"
+            recent_entries = list(self.master_history[-10:])
         try:
             history_lines = ["<Recent_Context>"]
-            for entry in self.master_history[-10:]:
+            for entry in recent_entries:
                 dt = datetime.fromisoformat(entry.get('timestamp', datetime.now().isoformat()))
                 time_str = dt.strftime('%H:%M')
                 role = entry.get('role', 'UNKNOWN')
@@ -680,13 +805,16 @@ Return STRICT JSON exactly in this schema:
                     log_content = []
                     apps_opened = metadata.get("apps_opened", [])
                     apps_closed = metadata.get("apps_closed", [])
+                    files_touched = metadata.get("files_touched", [])
                     system_events = metadata.get("system_events", [])
-                    if apps_opened or apps_closed or system_events:
+                    if apps_opened or apps_closed or files_touched or system_events:
                         log_content.append("  ACTIONS TAKEN:")
                         if apps_opened:
                             log_content.append(f"  - Opened Apps: {', '.join(apps_opened)}")
                         if apps_closed:
                             log_content.append(f"  - Closed Apps: {', '.join(apps_closed)}")
+                        if files_touched:
+                            log_content.append(f"  - Files Touched: {', '.join(files_touched)}")
                         for evt in system_events:
                             log_content.append(f"  - System: {evt}")
                         log_content.append("")

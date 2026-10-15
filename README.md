@@ -301,7 +301,7 @@ This is the same reason enterprise copilots (Lovable, Devin, Cursor Agents) figh
 - [Technical Architecture](#️-technical-architecture)
 - [Dual-Engine AI: FastBrain vs AgenticBrain](#-dual-engine-ai-fastbrain-vs-agenticbrain)
 - [Lifelong Episodic Memory & Hybrid RAG](#-lifelong-episodic-memory--hybrid-rag)
-- [Android Mobile Control via Termux SSH](#-android-mobile-control-via-termux-ssh)
+- [Android Mobile Control via Termux & WebSocket Bridge](#-android-mobile-control-via-termux--websocket-bridge)
 - [Integrated Tool Ecosystem](#️-integrated-tool-ecosystem)
 - [PC System Monitoring & Proactive Alerts](#-pc-system-monitoring--proactive-alerts)
 - [Installation](#-installation)
@@ -337,11 +337,12 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🛡️ | **Line-Drift-Free Code Editing** | Uses exact `replace_block` search-and-replace instead of line numbers. Syntax errors are caught via AST lint and auto-corrected without human intervention. |
 | 🧠 | **Lifelong Episodic LTM & Hybrid RAG** | Vector-backed property graph with bidirectional edges, confidence scores, and temporal decay. Workspace documents are indexed with smart chunk overlap and retrieved via **Hybrid search (BM25 + Vector + RRF)** with recency boost. |
 | 📊 | **Web Knowledge Indexer Dashboard** | Local Flask dashboard at `127.0.0.1:8080` for managing indexed folders and filters. Auto-indexes `Documents` by default, user can add any folder via UI, with smart filters (system paths blocked, sensitive paths warned, garbage excluded), live progress, pause/resume, and per-folder stats. |
-| 🗜️ | **Compressed 15-Day Memory** | Two-tier short-term memory: recent 2 days verbatim raw messages + older days compressed into LLM-generated daily summaries. Keyword-filterable retrieval avoids truncation loss and token bloat. |
-| 🔄 | **Hybrid Semantic AI Routing** | Semantic router decides FastBrain vs AgenticBrain per command. Falls back to a local rule-based router if the semantic router is unavailable. |
-| 📱 | **Android Termux SSH Control** | Remote control of an Android phone over a Tailscale SSH tunnel using the Termux API — calls, SMS, sensors, battery, torch, notifications — with clean JSON output. |
+| 🗜️ | **Compressed 15-Day Memory & Execution Logs** | Two-tier short-term memory: recent 2 days verbatim raw messages enriched with `<System_Execution_Log>` metadata (`apps_opened`, `apps_closed`, `files_touched`, `system_events`) + older days compressed into LLM-generated daily summaries. |
+| ⚡ | **Thread-Safe Ephemeral State (TTL Artifacts)** | Tracks live connected phones (`mtime`-cached), 10-minute TTL transient artifacts (`last_screenshot`, `last_generated_image`) for seamless FastBrain-to-AgenticBrain handoff, and 90-second auto-expiring HITL confirmation payloads. |
+| 🔄 | **Hybrid Semantic AI Routing** | Semantic router decides FastBrain vs AgenticBrain per command, with instant proactive confirmation interception and a local rule-based fallback router. |
+| 📱 | **Android Termux & WebSocket Bridge** | Native control of Android devices and bidirectional batch file transfers over a persistent local WiFi/WebSocket bridge (`127.0.0.1:8090`) using Termux API and Android Intents — no SSH required. |
 | 🌍 | **Telegram Remote PC Control** | Trigger silent background PC commands from anywhere via a secure Telegram bot, without disturbing your active desktop session. |
-| 📨 | **Proactive Automation (Email / WhatsApp / Telegram / Calendar)** | Background listeners plus a Scout agent that filters noise, flags importance, and requests consent before any permanent modification. |
+| 📨 | **Proactive HITL Automation (Email / WhatsApp / Telegram / Calendar)** | Background listeners plus a silent Scout agent that filters spam, distinguishes FYI alerts from consent-requiring actions (`requires_confirmation`), and preserves full event context (`pending_task_data`) until the user confirms. |
 | 💻 | **PC System Monitoring & Alerts** | Tracks CPU, RAM, disk, battery, network, and USB insertion events. Applies smart cooldown, idle and fullscreen suppression, and LLM-based relevance filtering. |
 | 🎙️ | **Dual-Engine Wake Word** | Primary wake word via **Azure Custom Keyword (on-device, 97%+ accurate)** backed by a real-time DSP audio conditioner (85Hz High-Pass IIR filter, Pre-Emphasis, Speech-Gated AGC) and a 5-gate acoustic verifier (Dual WebRTC VAD, SNR, ZCR, duration gating), with automatic fallback to **Vosk KWS**. Both run fully on-device with zero cloud round-trip. |
 | 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT supercharged by a self-healing LTM vocabulary cache (auto-syncing entities from `lifetime_graph.json` and chat history), 85Hz high-pass audio conditioning, multi-alternative confidence scoring, and `<1ms` phonetic/contextual transcript repair (`kaf/caf` → `Kaif`, `word` ↔ `world`). Low-latency Sarvam TTS + Edge TTS streaming pipeline with progressive first-clause micro-chunking, persistent HTTP connection pooling, generation-locked barge-in, 15-min quota circuit breaker, LRU audio cache, and Hinglish tech/phonetic normalization (`.py` → `"dot pie"`), plus multimodal OCR and image generation. |
@@ -349,7 +350,7 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🔌 | **Multi-LLM Auto-Failover** | Regolo, Gemini, OpenRouter, or local providers (Ollama, LM Studio, vLLM). Primary provider failure routes to fallback automatically. |
 | 🎨 | **Reactive UI Ecosystem** | ZMQ-powered PyQt5 Agent Panel streaming thought, action, and observation in real time. Markdown typing popup with async image preview and glass-morphism styling. |
 | 🔒 | **Command-Level Security Guardrails** | `shlex` tokenization blocks destructive terminal commands. Local AES-encrypted tokens (`.enc`) for Gmail, Calendar, and Telegram sessions. |
-| ⚙️ | **ServiceWatchdog Resilience** | Monitors STT, Baileys, Telegram, and the Indexer Dashboard subprocesses. Auto-restarts crashed services and skips unauthenticated modules to prevent log spam. |
+| ⚙️ | **ServiceWatchdog Resilience** | Monitors STT Popup, Baileys WhatsApp server, Mobile Bridge (`8090`), Telegram Remote Bot, and the Indexer Dashboard (`8080`). Auto-restarts crashed services with cooldown backoff and skips unauthenticated modules. |
 | 🪶 | **Runs on 4GB RAM** | Verified on an Intel i5-3210M (2012) with 4 GB RAM. Cloud LLM APIs + ONNX-based RapidOCR + `bge-small` embeddings keep the footprint tiny. |
 
 ---
@@ -477,8 +478,8 @@ flowchart TD
         LTM[("🗄️ Vector Semantic Graph LTM<br/>Weighted Graph + Subgraph + Decay")]
         RAG[("📚 ChromaDB Knowledge Index<br/>Documents + Custom Folders<br/>Hybrid Vector + BM25 + RRF")]
         Indexer["📊 Web Indexer Dashboard<br/>Flask @ 127.0.0.1:8080<br/>Folder + Filter Management"]
-        JSONL["📜 Rolling History<br/>2-Day Raw + 13-Day Summaries"]
-        Profile["👤 User Profile & Mood"]
+        JSONL["📜 Rolling History + Execution Logs<br/>2-Day Raw (Files/Apps/Events) + 13-Day Summaries"]
+        Ephemeral["⚡ Thread-Safe Ephemeral State<br/>10m TTL Artifacts + Device Cache + 90s HITL State"]
     end
 
     Indexer -.->|Config + Filters| RAG
@@ -494,7 +495,7 @@ flowchart TD
         Search["🌐 Web / ArXiv / Scraper"]
         Vision["👁️ Vision Multimodal / OCR"]
         Image["🎨 Image Gen / Edit"]
-        Mobile["📱 Termux SSH / Mobile Control"]
+        Mobile["📱 Mobile Bridge (8090) / Termux API"]
         PC["💻 PC Monitor / System Health"]
     end
 
@@ -553,27 +554,29 @@ Jarvis uses two brains to optimize for both speed and depth.
 | **File Operations** | ❌ | ✅ Full CRUD, `repo_map`, `replace_block` |
 | **Communication** | ❌ | ✅ Gmail, WhatsApp, Telegram, Calendar |
 | **Code Execution** | ❌ | ✅ `run_python_code`, `execute_terminal_command` |
-| **Memory Recall** | ❌ | ✅ Lifetime vector-graph recall |
+| **Memory Recall** | Rolling 10-turn history + `<System_Execution_Log>` + Ephemeral TTL artifacts | Full 15-day history + Lifetime vector-graph recall + Hybrid RAG + Ephemeral state |
 | **Live Mid-Execution Correction** | ❌ | ✅ Interruptible loop re-plans per step |
 | **Wake Word Engine** | ✅ Azure Custom Keyword (on-device) with Vosk fallback | ✅ Same wake engine, plus multimodal vision |
 | **Multimodal Vision** | ❌ | ✅ Image and video analysis, OCR |
 | **Web Research** | Quick web search | Deep research, ArXiv, YouTube transcripts |
-| **Mobile Control** | ❌ | ✅ Termux SSH |
+| **Mobile Control** | Aware of active connected devices | ✅ Full Termux API & bidirectional WiFi file transfer |
 | **PC Monitoring** | ❌ | ✅ CPU / RAM / Disk / Battery / Network |
-| **Proactive HITL** | ❌ | ✅ Consent gate before permanent changes |
+| **Proactive HITL** | ❌ | ✅ 90s TTL consent gate with full task context handoff |
 
 ---
 
 ## 🧠 Lifelong Episodic Memory & Hybrid RAG
 
-Jarvis implements a **four-tier** memory system:
+Jarvis implements a **four-tier** zero-duplication memory architecture:
 
-1. **📜 Rolling JSONL History (Short-Term):** Two-tier 15-day rolling context — recent 2 days kept as verbatim raw messages, older days compressed into per-day LLM summaries. Auto-pruned with zero data loss, keyword-filterable retrieval.
-2. **🗄️ Bidirectional Property Graph Memory (Long-Term):**
-   - **Graph Structure:** Built on `NetworkX`. Every fact stores deep context (`metadata`), source messages, and confidence scores.
+1. **📜 Rolling JSONL History & Execution Logs (Short-Term Episodic):**
+   - **Two-Tier 15-Day Retention:** Recent 2 days kept as verbatim raw messages, older days (up to 15 days) compressed into LLM-generated daily summaries (`daily_summaries.jsonl`). Auto-pruned with zero data loss and keyword-filterable retrieval.
+   - **Structured `<System_Execution_Log>` Tracking:** Every turn records exact execution metadata (`apps_opened`, `apps_closed`, `files_touched`, and `system_events`), giving both FastBrain and AgenticBrain full awareness of recently created/edited files, opened URLs, and contacted recipients over the last 10 turns.
+2. **🗄️ Bidirectional Property Graph Memory (Long-Term Semantic LTM):**
+   - **Graph Structure:** Built on `NetworkX`. Every permanent fact passing the "1-Year Test" stores deep context (`metadata`), source messages, and confidence scores.
    - **Bidirectional Awareness:** Auto-generates inverse edges — for example, `[User] -> (FATHER) -> [FatherName]` also creates `[FatherName] -> (CHILD) -> [User]`.
-   - **Semantic Edge Routing:** Matches relational edge intent first, then falls back to deep semantic similarity against exact conversation context.
-   - **Temporal Decay:** Relations older than 6 months lose half their weight. The embedding engine (`BAAI/bge-small-en-v1.5`) is preloaded at startup for zero-latency multi-entity traversal.
+   - **Semantic Edge Deduplication & Routing:** Auto-merges synonymous relations above `0.85` cosine similarity, matches relational edge intent first, and falls back to deep semantic similarity against conversation context.
+   - **Temporal Decay:** Relations older than 6 months lose half their weight and auto-archive. The embedding engine (`BAAI/bge-small-en-v1.5`) is preloaded at startup for zero-latency multi-entity traversal.
 3. **📚 Hybrid RAG (Personal Knowledge Index):**
    - **Default Scope:** Auto-indexes the user's `Documents` folder at startup. User can add any folder via the built-in web dashboard.
    - **Smart Chunking:** 1500-character chunks with 200-character overlap, code-aware (line-based) chunking for `.py`, `.js`, `.ts`, `.java`, `.cpp`, and 15+ other source formats.
@@ -582,7 +585,10 @@ Jarvis implements a **four-tier** memory system:
    - **Smart Filters:** Auto-excludes system paths (`C:\Windows`, `Program Files`), dev garbage (`node_modules`, `venv`, `.git`, `build`), binaries, media, and files > 5 MB. Detects and warns on sensitive paths (`.ssh`, `.aws`, `.env`, browser profiles).
    - **Incremental Indexing:** Hash-based change detection — only modified files are re-embedded on each run.
    - **Web Dashboard:** Local Flask UI at `127.0.0.1:8080` with live progress, folder management (add/remove/reindex), filter editor, and pause/resume controls.
-4. **👤 User Profile & Mood Tracker:** Auto-extracts user bio, preferences, and mood states into knowledge-graph triplets.
+4. **⚡ Thread-Safe Ephemeral Runtime Memory (Live State & Handoff):**
+   - **10-Minute TTL Artifacts:** Stores transient unspoken system artifacts (`last_screenshot`, `last_generated_image`) with automatic TTL pruning so a screenshot taken via FastBrain is immediately accessible to AgenticBrain on the next turn.
+   - **`mtime`-Cached Hardware State:** Tracks live connected Android phones (`connected_devices.json`) using file modification timestamps for zero-overhead per-step reads.
+   - **90-Second Proactive HITL State Machine:** Manages `waiting_for_confirmation`, `pending_task_data`, and atomic `force_silent_agentic` flags via background timers so affirmative user replies seamlessly inject the original proactive event payload into AgenticBrain.
 
 ---
 
@@ -788,6 +794,9 @@ Copy `.env.example` to `.env` and populate your credentials. For 100% local LLM 
 | `LTM_EXTRACTION_API_KEY` | LTM extraction key | Required |
 | `LTM_EXTRACTION_MODEL` | LTM extraction model | `llama-3.3-70b-versatile` |
 | `LTM_EXTRACTION_ENDPOINT` | LTM endpoint | `https://api.groq.com/openai/v1` |
+| `MEMORY_SUMMARY_API_KEY` | 15-day daily summary LLM key | Required for summaries |
+| `MEMORY_SUMMARY_MODEL` | Daily summary model | `llama-3.3-70b-versatile` |
+| `MEMORY_SUMMARY_ENDPOINT` | Daily summary endpoint | `https://api.groq.com/openai/v1` |
 | `IMAGE_GEN_API_KEY` | Image generation key | Optional |
 | `IMAGE_GEN_MODEL` | Image model | `dall-e-3` |
 | `IMAGE_GEN_ENDPOINT` | Image endpoint | `https://api.openai.com/v1` |

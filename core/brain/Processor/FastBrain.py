@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import tempfile
 import datetime
 import traceback
 from typing import Dict, Optional, Tuple
@@ -55,12 +56,20 @@ def build_fast_brain_context(memory_instance=None, ephemeral: dict = None) -> st
     fast_history = memory_instance.get_fast_history_context() if memory_instance else "No recent conversation."
     context += f"[[RECENT CONVERSATION]]\n{fast_history}\n\n"
 
-    if ephemeral:
-        context += "[[RECENT AGENT ACTIVITY]]\n"
-        if ephemeral.get("last_found_links"):
-            context += f"Links found earlier: {', '.join(ephemeral['last_found_links'])}\n"
+    if memory_instance and hasattr(memory_instance, "get_ephemeral_context"):
+        ephemeral_block = memory_instance.get_ephemeral_context(mode="fast")
+        if ephemeral_block:
+            context += ephemeral_block
+    elif ephemeral:
+        activity_lines = []
+        if ephemeral.get("connected_devices"):
+            activity_lines.append(f"Active Connected Phones: {', '.join(ephemeral['connected_devices'])}")
         if ephemeral.get("last_generated_image"):
-            context += f"Last generated image: {ephemeral['last_generated_image']}\n"
+            activity_lines.append(f"Last generated image: {ephemeral['last_generated_image']}")
+        if ephemeral.get("last_screenshot"):
+            activity_lines.append(f"Last screenshot taken: {ephemeral['last_screenshot']}")
+        if activity_lines:
+            context += "[[RECENT AGENT ACTIVITY]]\n" + "\n".join(activity_lines) + "\n"
 
     return context
 
@@ -307,6 +316,14 @@ def fetch_from_groq(raw_command: str, memory_instance=None, ephemeral: dict = No
 
                 if tool_name == "system_controller":
                     agent_reply = _handle_system_controller(tool_args_str, result)
+                    if result.get("system_action") == "screenshot":
+                        shot_name = f"jarvis_screenshot_{int(time.time())}.png"
+                        shot_full_path = os.path.join(tempfile.gettempdir(), shot_name)
+                        result["screenshot_filename"] = shot_name
+                        if memory_instance and hasattr(memory_instance, "set_last_artifact"):
+                            memory_instance.set_last_artifact("last_screenshot", shot_full_path)
+                        elif isinstance(ephemeral, dict):
+                            ephemeral["last_screenshot"] = shot_full_path
                     if agent_reply:
                         response_parts.append(agent_reply)
 

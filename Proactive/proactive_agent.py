@@ -99,7 +99,7 @@ def clean_json_string(raw_text: str) -> str:
 
 
 def evaluate_events_batch(batched_data: str, recent_history: str) -> Dict[str, Any]:
-    default_ignore = {"decision": "IGNORE", "emotion_tag": "[calm]", "agent_command": ""}
+    default_ignore = {"decision": "IGNORE", "requires_confirmation": False, "emotion_tag": "[calm]", "agent_command": ""}
     if not proactive_client:
         return default_ignore
 
@@ -164,11 +164,6 @@ def _speech_worker():
                 reset_agent_status()
             except Exception:
                 pass
-            if memory_instance and hasattr(memory_instance, 'get_and_clear_feedback'):
-                try:
-                    memory_instance.get_and_clear_feedback()
-                except Exception:
-                    pass
 
 
 def _ensure_speech_worker():
@@ -218,6 +213,7 @@ def agentic_worker(is_jarvis_busy_callback=None):
             agent_context = task.get("agent_context")
             memory_instance = task.get("memory_instance")
             decision = task.get("decision")
+            requires_confirmation = bool(task.get("requires_confirmation", False))
 
             if is_jarvis_busy_callback:
                 while is_jarvis_busy_callback() and not _stop_proactive.is_set():
@@ -236,6 +232,17 @@ def agentic_worker(is_jarvis_busy_callback=None):
                     while is_jarvis_busy_callback() and not _stop_proactive.is_set():
                         time.sleep(1)
 
+                should_wait = requires_confirmation or ("?" in reply_text)
+                if should_wait and memory_instance and hasattr(memory_instance, "set_pending_confirmation"):
+                    memory_instance.set_pending_confirmation(
+                        task_data={
+                            "agent_command": agent_command,
+                            "batched_data": agent_context,
+                            "proactive_question": reply_text
+                        },
+                        ttl_seconds=90
+                    )
+
                 safe_proactive_speak(reply_text, memory_instance)
 
                 _memory_add_message(
@@ -245,7 +252,7 @@ def agentic_worker(is_jarvis_busy_callback=None):
                     metadata={
                         "is_background_event": False,
                         "decision": decision,
-                        "waiting_for_confirmation": True
+                        "waiting_for_confirmation": should_wait
                     }
                 )
         except Exception as e:
@@ -255,6 +262,7 @@ def agentic_worker(is_jarvis_busy_callback=None):
 def handle_proactive_decision(decision_data, batched_data, memory_instance, is_jarvis_busy_callback):
     decision = decision_data.get("decision", "IGNORE").upper()
     agent_command = decision_data.get("agent_command", "").strip()
+    requires_confirmation = bool(decision_data.get("requires_confirmation", False))
 
     if "IGNORE" in decision:
         return
@@ -269,7 +277,8 @@ def handle_proactive_decision(decision_data, batched_data, memory_instance, is_j
             "agent_command": agent_command,
             "agent_context": f"[PROACTIVE EVENT TRIGGER]\n{batched_data}",
             "memory_instance": memory_instance,
-            "decision": decision
+            "decision": decision,
+            "requires_confirmation": requires_confirmation
         })
 
 

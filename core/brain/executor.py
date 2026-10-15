@@ -123,7 +123,8 @@ def execute_actions(result: Dict[str, any], executor: ThreadPoolExecutor) -> str
                 action = result['system_action']
                 if action == 'screenshot':
                     temp_dir = tempfile.gettempdir()
-                    msg = SystemController.capture_screenshot(save_dir=temp_dir)
+                    shot_filename = result.get('screenshot_filename') or f"jarvis_screenshot_{int(time.time())}.png"
+                    msg = SystemController.capture_screenshot(filename=shot_filename, save_dir=temp_dir)
                     log_action(f"📸 {msg}")
                     executor.submit(speak, "Screenshot save ho gaya sir.")
                 elif action in ['lock', 'sleep']:
@@ -588,10 +589,11 @@ def handle_system_controller(system_ctrl: dict) -> str:
     system_action = system_ctrl.get('system_action')
     if system_action:
         if system_action == 'screenshot':
-            custom_filename = system_ctrl.get('screenshot_filename')
+            custom_filename = system_ctrl.get('screenshot_filename') or f"jarvis_screenshot_{int(time.time())}.png"
             temp_dir = tempfile.gettempdir()
+            expected_path = os.path.join(temp_dir, custom_filename)
             msg = SystemController.capture_screenshot(filename=custom_filename, save_dir=temp_dir)
-            sys_observations.append(msg if "error" in msg.lower() else f"{msg}. Screenshot taken successfully.")
+            sys_observations.append(msg if "error" in msg.lower() else f"{msg} | ScreenshotPath: {expected_path}. Screenshot taken successfully.")
         elif system_action == 'lock':
             sys_observations.append(SystemController.lock_pc())
         elif system_action == 'sleep':

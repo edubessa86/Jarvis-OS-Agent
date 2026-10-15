@@ -238,10 +238,18 @@ def run_jarvis():
 
         class FakeMemory:
             def get_relevant_context(self, text): return ""
+            def get_fast_history_context(self): return "No recent conversation."
+            def get_agentic_fast_context(self): return "<Recent_Context>\nNo recent conversation.\n</Recent_Context>"
+            def get_ephemeral_context(self, mode="agentic"): return ""
             def add_message(self, role, text, metadata=None): pass
             preferences = {"likes": []}
             ephemeral = {}
-            def get_and_clear_feedback(self): return None
+            def set_pending_confirmation(self, task_data=None, ttl_seconds=90): pass
+            def clear_pending_confirmation(self): pass
+            def consume_pending_confirmation(self): return None
+            def consume_silent_flag(self): return False
+            def set_last_artifact(self, key, file_path, ttl_seconds=600): pass
+            def get_and_clear_feedback(self): return ""
             def add_live_feedback(self, cmd): pass
             def catchup_summaries(self): pass
 

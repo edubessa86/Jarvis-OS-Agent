@@ -234,14 +234,15 @@ User Command: "{raw_command}"
                 timeout_msg = "Task was taking too long and timed out. Please try again or provide a simpler command."
                 launch_popup()
                 update_typing_status("completed", timeout_msg)
+                send_telegram_update(final_response=timeout_msg)
+                clear_telegram_context()
             else:
                 timeout_msg = "Background task timeout."
-            send_telegram_update(final_response=timeout_msg)
-            clear_telegram_context()
             return make_result(timeout_msg, priority="high", agent_executed=True)
 
         if is_shutdown():
             logger.warning("🛑 Shutdown signal detected. Aborting Agentic Loop immediately.")
+            msg = "Shutdown signal received. Task aborted."
             if not silent:
                 update_agent_status(
                     step=0,
@@ -251,9 +252,8 @@ User Command: "{raw_command}"
                     action_detail="",
                     tokens=total_loop_tokens,
                 )
-            msg = "Shutdown signal received. Task aborted."
-            send_telegram_update(final_response=msg)
-            clear_telegram_context()
+                send_telegram_update(final_response=msg)
+                clear_telegram_context()
             return make_result(msg, priority="high", agent_executed=True)
 
         logger.info(
@@ -291,34 +291,16 @@ User Command: "{raw_command}"
             else "No confirmed facts pinned yet."
         )
 
-        ephemeral_prompt = ""
-        try:
-            import json
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root_dir = os.path.abspath(os.path.join(current_dir, "..", "..", ".."))
-            devices_file = os.path.join(project_root_dir, "Data", "SessionCookies", "connected_devices.json")
-            
-            if os.path.exists(devices_file):
-                with open(devices_file, "r", encoding="utf-8") as f:
-                    connected_devices = json.load(f)
-                if connected_devices:
-                    ephemeral["connected_devices"] = connected_devices
-                elif "connected_devices" in ephemeral:
-                    del ephemeral["connected_devices"]
-        except Exception as e:
-            logger.warning(f"Failed to read connected devices: {e}")
-
-        if ephemeral.get("connected_devices"):
-            ephemeral_prompt += f"\n[EPHEMERAL: Active Connected Phones = {', '.join(ephemeral['connected_devices'])}]"
-        if ephemeral.get("last_found_links"):
-            ephemeral_prompt += f"\n[EPHEMERAL: Last found links = {ephemeral['last_found_links']}]"
-        if ephemeral.get("last_generated_image"):
-            ephemeral_prompt += f"\n[EPHEMERAL: Last generated image = {ephemeral['last_generated_image']}]"
-        if ephemeral.get("last_screenshot"):
-            ephemeral_prompt += f"\n[EPHEMERAL: Last screenshot taken = {ephemeral['last_screenshot']}]"
-        if ephemeral.get("last_contact"):
-            ephemeral_prompt += f"\n[EPHEMERAL: Last contacted person/email = {ephemeral['last_contact']}]"
+        if memory_instance and hasattr(memory_instance, "get_ephemeral_context"):
+            ephemeral_prompt = memory_instance.get_ephemeral_context(mode="agentic")
+        else:
+            ephemeral_prompt = ""
+            if ephemeral.get("connected_devices"):
+                ephemeral_prompt += f"\n[EPHEMERAL: Active Connected Phones = {', '.join(ephemeral['connected_devices'])}]"
+            if ephemeral.get("last_generated_image"):
+                ephemeral_prompt += f"\n[EPHEMERAL: Last generated image = {ephemeral['last_generated_image']}]"
+            if ephemeral.get("last_screenshot"):
+                ephemeral_prompt += f"\n[EPHEMERAL: Last screenshot taken = {ephemeral['last_screenshot']}]"
 
         prompt = f"""[SYSTEM STATUS]
 Time: {current_time}
@@ -633,39 +615,29 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                     action_detail=action_detail,
                     tokens=total_loop_tokens,
                 )
-                
-            send_telegram_update(
-                step=f"{step + 1}/{max_steps}",
-                thought=ai_response.get("thought", ""),
-                action=f"{action_key} ({action_detail})" if action_key else "Thinking..."
-            )
+                send_telegram_update(
+                    step=f"{step + 1}/{max_steps}",
+                    thought=ai_response.get("thought", ""),
+                    action=f"{action_key} ({action_detail})" if action_key else "Thinking..."
+                )
 
             if ai_response.get("is_task_complete"):
                 logger.info("✅ Agent declared task complete!")
                 final_text = ai_response.pop("response", "Task completed sir.")
 
-                sys_ctrl = ai_response.get("system_controller", {})
-                if sys_ctrl.get("urls_to_open"):
-                    ephemeral["last_found_links"] = sys_ctrl["urls_to_open"]
-                if ai_response.get("image_command", {}).get("filename"):
-                    ephemeral["last_generated_image"] = ai_response[
-                        "image_command"
-                    ]["filename"]
-
-                update_agent_status(
-                    step=0,
-                    total_steps=max_steps,
-                    thought="Task completed",
-                    action="",
-                    action_detail="",
-                    tokens=total_loop_tokens,
-                )
-
-                launch_popup()
-                update_typing_status("completed", final_text)
-                
-                send_telegram_update(final_response=final_text)
-                clear_telegram_context()
+                if not silent:
+                    update_agent_status(
+                        step=0,
+                        total_steps=max_steps,
+                        thought="Task completed",
+                        action="",
+                        action_detail="",
+                        tokens=total_loop_tokens,
+                    )
+                    launch_popup()
+                    update_typing_status("completed", final_text)
+                    send_telegram_update(final_response=final_text)
+                    clear_telegram_context()
 
                 return make_result(
                     final_text,
@@ -735,33 +707,72 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                         is_failure = _is_failure_prefix(str(observation))
 
                         if not is_failure:
+                            obs_text = str(observation)
                             for t_key in executed_tools:
                                 t_val = ai_response.get(t_key, {})
+                                if not isinstance(t_val, dict):
+                                    t_val = {}
                                 action_fingerprint = f"{t_key}:{str(t_val)[:100]}"
                                 completed_actions.add(f"{action_fingerprint} -> [SUCCESS]")
                                 
                                 update_confirmed_facts(confirmed_facts, t_key, action_detail, observation)
 
-                                if t_key in ["email_action", "whatsapp_action"]:
-                                    ephemeral["last_contact"] = t_val.get("to", "")
-
-                                if "http" in observation and "link" in observation.lower():
-                                    urls = re.findall(r"https?://[^\s]+", observation)
-                                    if urls: ephemeral["last_found_links"] = urls[:3]
-                                
-                                if "file" in observation.lower() and (".png" in observation or ".md" in observation or ".txt" in observation or ".jpg" in observation):
-                                    file_match = re.search(r"([\w\-:\\/.]+\.(png|md|txt|jpg))", observation)
-                                    if file_match: ephemeral["last_accessed_file"] = file_match.group(1)
-
                                 try:
                                     if t_key == "system_controller":
-                                        if t_val.get("apps_to_open"): metadata_tracker["apps_opened"].extend(t_val["apps_to_open"])
-                                        if t_val.get("apps_to_close"): metadata_tracker["apps_closed"].extend(t_val["apps_to_close"])
-                                        if t_val.get("urls_to_open"): metadata_tracker["system_events"].append(f"Opened URLs: {', '.join(t_val['urls_to_open'])}")
+                                        if t_val.get("apps_to_open"):
+                                            metadata_tracker["apps_opened"].extend(t_val["apps_to_open"])
+                                        if t_val.get("apps_to_close"):
+                                            metadata_tracker["apps_closed"].extend(t_val["apps_to_close"])
+                                        if t_val.get("urls_to_open"):
+                                            metadata_tracker["system_events"].append(f"Opened URLs: {', '.join(t_val['urls_to_open'])}")
                                         if t_val.get("system_action"):
                                             metadata_tracker["system_events"].append(f"System Action: {t_val['system_action']}")
-                                            if t_val.get("system_action") == "screenshot" and t_val.get("screenshot_filename"):
-                                                ephemeral["last_screenshot"] = t_val.get("screenshot_filename")
+                                            if t_val.get("system_action") == "screenshot":
+                                                shot_match = re.search(r"ScreenshotPath:\s*(.+?)(?:\.?\s*Screenshot taken|\n|$)", obs_text)
+                                                shot_path = shot_match.group(1).strip() if shot_match else t_val.get("screenshot_filename", "")
+                                                if shot_path:
+                                                    if shot_path not in metadata_tracker["files_touched"]:
+                                                        metadata_tracker["files_touched"].append(shot_path)
+                                                    if memory_instance and hasattr(memory_instance, "set_last_artifact"):
+                                                        memory_instance.set_last_artifact("last_screenshot", shot_path)
+                                                    else:
+                                                        ephemeral["last_screenshot"] = shot_path
+                                    elif t_key == "image_command":
+                                        img_match = re.search(r"at absolute path:\s*(.+?)\.(?:\s|\n|$)", obs_text)
+                                        img_path = img_match.group(1).strip() if img_match else t_val.get("filename", "")
+                                        if img_path:
+                                            if img_path not in metadata_tracker["files_touched"]:
+                                                metadata_tracker["files_touched"].append(img_path)
+                                            if memory_instance and hasattr(memory_instance, "set_last_artifact"):
+                                                memory_instance.set_last_artifact("last_generated_image", img_path)
+                                            else:
+                                                ephemeral["last_generated_image"] = img_path
+                                        metadata_tracker["system_events"].append(f"Image {t_val.get('action', 'generate')}: {img_path or t_val.get('prompt', '')[:40]}")
+                                    elif t_key == "file_operations":
+                                        touched = []
+                                        if t_val.get("file_path"):
+                                            touched.append(str(t_val["file_path"]))
+                                        if isinstance(t_val.get("file_paths"), list):
+                                            touched.extend(str(p) for p in t_val["file_paths"] if p)
+                                        if isinstance(t_val.get("files"), list):
+                                            touched.extend(str(item.get("file_path")) for item in t_val["files"] if isinstance(item, dict) and item.get("file_path"))
+                                        for p in touched:
+                                            if p not in metadata_tracker["files_touched"]:
+                                                metadata_tracker["files_touched"].append(p)
+                                        metadata_tracker["system_events"].append(f"File Op ({t_val.get('action', '')})")
+                                    elif t_key == "file_transfer_action":
+                                        if isinstance(t_val.get("file_paths"), list):
+                                            for p in t_val["file_paths"]:
+                                                if p and str(p) not in metadata_tracker["files_touched"]:
+                                                    metadata_tracker["files_touched"].append(str(p))
+                                        metadata_tracker["system_events"].append(f"File Transfer ({t_val.get('direction', '')})")
+                                    elif t_key in ["email_action", "whatsapp_action", "telegram_action"]:
+                                        act_mode = t_val.get("action", "send")
+                                        target_to = t_val.get("to", "")
+                                        evt_desc = f"{t_key} ({act_mode})" + (f" -> {target_to}" if target_to else "")
+                                        metadata_tracker["system_events"].append(evt_desc)
+                                        if t_val.get("file_path") and str(t_val["file_path"]) not in metadata_tracker["files_touched"]:
+                                            metadata_tracker["files_touched"].append(str(t_val["file_path"]))
                                     elif t_key == "execute_terminal_command":
                                         metadata_tracker["system_events"].append(f"Terminal Command: {t_val.get('command', '')}")
                                     elif t_key == "run_python_code":
@@ -781,7 +792,7 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                     observation=str(observation)[:200],
                                     tokens=total_loop_tokens,
                                 )
-                            send_telegram_update(observation=str(observation))
+                                send_telegram_update(observation=str(observation))
                             break
                         else:
                             obs_str = str(observation).strip()
@@ -847,11 +858,11 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                     limit_msg = "Bhai, saare AI providers ki limit khatam ho gayi. Thoda ruko aur phir try karo."
                     launch_popup()
                     update_typing_status("completed", limit_msg)
+                    send_telegram_update(final_response=limit_msg)
+                    clear_telegram_context()
                 else:
                     limit_msg = "All providers exhausted."
                 
-                send_telegram_update(final_response=limit_msg)
-                clear_telegram_context()
                 return make_result(
                     limit_msg, priority="high", agent_executed=True
                 )
@@ -880,11 +891,10 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
         limit_msg = f"I have reached the maximum steps ({max_steps}). The task has hit the loop limit. Please provide a simpler command."
         launch_popup()
         update_typing_status("completed", limit_msg)
+        send_telegram_update(final_response=limit_msg)
+        clear_telegram_context()
     else:
         limit_msg = f"Max steps ({max_steps}) reached."
-
-    send_telegram_update(final_response=limit_msg)
-    clear_telegram_context()
     
     return make_result(
         limit_msg,

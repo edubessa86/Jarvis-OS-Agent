@@ -200,16 +200,18 @@ def get_route_decision(command: str, memory_instance=None) -> str:
     if memory_instance and hasattr(memory_instance, "ephemeral"):
         if memory_instance.ephemeral.get("waiting_for_confirmation"):
             cmd_lower = command.lower().strip()
-            confirm_keywords = [
-                "haa", "ha", "yes", "yup", "han", "ha kar de", "ha krde",
-                "theek hai", "ok", "okay", "do it", "kar do", "kardo", "bilkul"
-            ]
-            if any(kw in cmd_lower for kw in confirm_keywords):
+            confirm_pattern = r'\b(haa|ha|han|yes|yup|yeah|sure|ok|okay|bilkul|zaroor|theek hai|thik hai|do it|kar do|kardo|krdo|kar de|krde|bhej do|update kar do)\b'
+            if re.search(confirm_pattern, cmd_lower):
                 memory_instance.ephemeral["waiting_for_confirmation"] = False
+                memory_instance.ephemeral["proactive_confirmed"] = True
                 logger.info("Proactive Confirmation detected -> Routing directly to AGENTIC")
                 return "AGENTIC"
             else:
-                memory_instance.ephemeral["waiting_for_confirmation"] = False
+                if hasattr(memory_instance, "clear_pending_confirmation"):
+                    memory_instance.clear_pending_confirmation()
+                else:
+                    memory_instance.ephemeral["waiting_for_confirmation"] = False
+                    memory_instance.ephemeral.pop("pending_task_data", None)
 
     history_context = ""
     if memory_instance and hasattr(memory_instance, "get_fast_history_context"):
@@ -235,10 +237,15 @@ def fetch_hybrid_response(raw_command: str, memory_instance=None) -> Optional[Di
             context_blocks = []
 
             is_silent = False
-            if memory_instance and hasattr(memory_instance, "ephemeral"):
-                is_silent = memory_instance.ephemeral.get("force_silent_agentic", False)
-
             if memory_instance:
+                if hasattr(memory_instance, "consume_silent_flag"):
+                    is_silent = memory_instance.consume_silent_flag()
+                elif hasattr(memory_instance, "ephemeral"):
+                    is_silent = bool(memory_instance.ephemeral.pop("force_silent_agentic", False))
+
+                if hasattr(memory_instance, "get_and_clear_feedback"):
+                    memory_instance.get_and_clear_feedback()
+
                 try:
                     logger.info("Fetching Initial Profile, Mood & Workspace Context...")
                     personal_context = memory_instance.get_relevant_context(raw_command)
@@ -246,6 +253,23 @@ def fetch_hybrid_response(raw_command: str, memory_instance=None) -> Optional[Di
                         context_blocks.append(personal_context)
                 except Exception as e:
                     logger.error(f"Memory Fetch Error: {e}")
+
+                if hasattr(memory_instance, "ephemeral") and memory_instance.ephemeral.get("proactive_confirmed"):
+                    pending_data = (
+                        memory_instance.consume_pending_confirmation()
+                        if hasattr(memory_instance, "consume_pending_confirmation")
+                        else memory_instance.ephemeral.pop("pending_task_data", None)
+                    )
+                    memory_instance.ephemeral.pop("proactive_confirmed", None)
+                    if isinstance(pending_data, dict):
+                        proactive_block = (
+                            "[CONFIRMED PROACTIVE TASK DETAILS]\n"
+                            f"Original Proactive Instruction: {pending_data.get('agent_command', '')}\n"
+                            f"Event Trigger Data:\n{pending_data.get('batched_data', '')}\n"
+                            f"Question Asked to User: {pending_data.get('proactive_question', '')}\n"
+                            "User has just confirmed this action. Execute the required tool now."
+                        )
+                        context_blocks.append(proactive_block)
 
             final_context = "\n".join(context_blocks)
 
@@ -258,7 +282,7 @@ def fetch_hybrid_response(raw_command: str, memory_instance=None) -> Optional[Di
                 if cleared_feedback:
                     logger.info(f"Flushed pending live feedback: {cleared_feedback}")
 
-            ephemeral = memory_instance.ephemeral if memory_instance else None
+            ephemeral = memory_instance.ephemeral if memory_instance and hasattr(memory_instance, "ephemeral") else None
             return fetch_from_groq(raw_command, memory_instance, ephemeral)
 
     except Exception as e:
@@ -267,7 +291,8 @@ def fetch_hybrid_response(raw_command: str, memory_instance=None) -> Optional[Di
         if memory_instance and hasattr(memory_instance, 'get_and_clear_feedback'):
             memory_instance.get_and_clear_feedback()
 
-        return fetch_from_groq(raw_command, memory_instance)
+        ephemeral = memory_instance.ephemeral if memory_instance and hasattr(memory_instance, "ephemeral") else None
+        return fetch_from_groq(raw_command, memory_instance, ephemeral)
 
 
 def process_command(raw_command: str, memory_instance=None) -> Dict[str, any]:

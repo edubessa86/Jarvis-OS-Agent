@@ -32,9 +32,14 @@ When writing "agent_command", structure it clearly for the Agentic Brain:
 - EXPLICIT PARAMETERS: [Exact dates, times, deadlines, or saved attachment file paths]
 - REQUIRED AGENT ACTION: [e.g., "Announce this to the user", or "Announce this and ask if they want to draft a reply using the email tool"]
 
+5. CONFIRMATION REQUIREMENT FLAG ("requires_confirmation"):
+   - Set "requires_confirmation" to true ONLY when the Agentic Brain must ask the user a yes/no question to execute a follow-up action (e.g., replying to an email/message, creating/updating a calendar event).
+   - Set "requires_confirmation" to false if the event is purely an FYI announcement (e.g., OTP, reminder alert, delivery notification) that requires no follow-up tool execution.
+
 JSON RESPONSE SCHEMA:
 {{
   "decision": "IGNORE | SUGGEST_ACTION",
+  "requires_confirmation": true,
   "emotion_tag": "[tag]",
   "agent_command": "Structured formal English instruction for the Agentic Brain if SUGGEST_ACTION, else empty string"
 }}
