@@ -1339,6 +1339,9 @@
                         <button class="btn-action act-clip" data-id="${safeId}" title="Send PC clipboard text to phone">
                             <i class="fa-solid fa-clipboard"></i><span>Paste</span>
                         </button>
+                        <button class="btn-action act-clip-get" data-id="${safeId}" title="Copy phone clipboard to PC">
+                            <i class="fa-solid fa-clipboard-check"></i><span>Copy</span>
+                        </button>
                         <button class="btn-action act-ring" data-id="${safeId}" title="Ring and vibrate phone">
                             <i class="fa-solid fa-bell"></i><span>Ring</span>
                         </button>
@@ -1371,17 +1374,19 @@
             });
 
             card.querySelector('.act-clip').addEventListener('click', async function () {
-                try {
-                    const text = await navigator.clipboard.readText();
-                    if (!text) {
-                        showToast('PC clipboard is empty', 'error');
-                        return;
+                let text = null;
+                if (navigator.clipboard && window.isSecureContext) {
+                    try {
+                        text = await navigator.clipboard.readText();
+                    } catch (e) {
+                        text = null;
                     }
-                    runQuickAction(id, 'clipboard_set', text, this);
-                } catch (e) {
-                    const manual = prompt('Enter text to send to phone clipboard:');
-                    if (manual) runQuickAction(id, 'clipboard_set', manual, this);
                 }
+                runQuickAction(id, 'clipboard_set', text || null, this);
+            });
+
+            card.querySelector('.act-clip-get').addEventListener('click', function () {
+                runQuickAction(id, 'clipboard_get', null, this);
             });
 
             card.addEventListener('dragover', (e) => {
@@ -1547,13 +1552,17 @@
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
             try {
                 const res = await fetch(`/api/disconnect/${encodeURIComponent(id)}`, { method: 'POST' });
-                if (!res.ok) {
+                if (res.ok) {
+                    removeDevice(id);
+                } else {
                     btn.disabled = false;
                     btn.innerHTML = orig;
+                    showToast('Failed to disconnect device', 'error');
                 }
             } catch (err) {
                 btn.disabled = false;
                 btn.innerHTML = orig;
+                showToast(`Disconnect error: ${err.message}`, 'error');
             }
         }
 
@@ -1678,6 +1687,17 @@
                     showTransferBanner(data.direction, data.filename, 100);
                     showToast(`Transfer complete: ${data.filename}`, 'success');
                     hideTransferBanner(1800);
+                } else if (data.type === 'transfer_error') {
+                    hideTransferBanner(200);
+                    showToast(`Transfer failed (${data.filename}): ${data.error || 'Interrupted'}`, 'error');
+                } else if (data.type === 'command_start') {
+                    showToast(`Running command on ${data.device_id}...`);
+                } else if (data.type === 'command_complete') {
+                    if (data.returncode === 0) {
+                        showToast(`Command finished on ${data.device_id}`, 'success');
+                    } else {
+                        showToast(`Command failed on ${data.device_id} (exit ${data.returncode})`, 'error');
+                    }
                 }
             };
 

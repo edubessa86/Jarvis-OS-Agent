@@ -18,6 +18,7 @@ _panel_process = None
 _stt_popup_process = None
 _baileys_process = None
 _mobile_bridge_process = None
+_mobile_bridge_start_time = 0.0
 _rag_engine_initialized = False
 _rag_dashboard_active = False
 _rag_engine_init_started = False
@@ -147,7 +148,8 @@ def is_baileys_running() -> bool:
     return _baileys_process.poll() is None
 
 def start_mobile_bridge():
-    global _mobile_bridge_process
+    global _mobile_bridge_process, _mobile_bridge_start_time
+    import time
     stop_mobile_bridge()
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -160,6 +162,7 @@ def start_mobile_bridge():
                 stderr=subprocess.DEVNULL,
                 creationflags=creation_flags
             )
+            _mobile_bridge_start_time = time.time()
             logging.info("Mobile Bridge server started successfully.")
         else:
             logging.warning(f"Mobile Bridge script not found at {bridge_script}")
@@ -167,7 +170,7 @@ def start_mobile_bridge():
         logging.error(f"Mobile Bridge server start failed: {e}")
 
 def stop_mobile_bridge():
-    global _mobile_bridge_process
+    global _mobile_bridge_process, _mobile_bridge_start_time
     if _mobile_bridge_process:
         try:
             proc_manager.kill_process_tree(_mobile_bridge_process.pid)
@@ -176,9 +179,19 @@ def stop_mobile_bridge():
         except Exception as e:
             logging.error(f"Error stopping Mobile Bridge server: {e}")
         _mobile_bridge_process = None
+        _mobile_bridge_start_time = 0.0
+    try:
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        state_file = os.path.join(base_dir, "Data", "SessionCookies", "connected_devices.json")
+        if os.path.exists(state_file):
+            with open(state_file, "w", encoding="utf-8") as f:
+                f.write("[]")
+    except Exception:
+        pass
 
 def is_mobile_bridge_running() -> bool:
-    global _mobile_bridge_process
+    global _mobile_bridge_process, _mobile_bridge_start_time
+    import time
     if _mobile_bridge_process is None or _mobile_bridge_process.poll() is not None:
         return False
     try:
@@ -186,7 +199,9 @@ def is_mobile_bridge_running() -> bool:
         with socket.create_connection(("127.0.0.1", 8090), timeout=1.5):
             return True
     except Exception:
-        return _mobile_bridge_process.poll() is None
+        if time.time() - _mobile_bridge_start_time < 8.0:
+            return _mobile_bridge_process.poll() is None
+        return False
 
 def start_rag_engine():
     global _rag_engine_init_started, _rag_engine_initialized
