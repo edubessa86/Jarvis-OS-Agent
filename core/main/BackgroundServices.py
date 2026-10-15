@@ -199,7 +199,7 @@ def is_mobile_bridge_running() -> bool:
         with socket.create_connection(("127.0.0.1", 8090), timeout=1.5):
             return True
     except Exception:
-        if time.time() - _mobile_bridge_start_time < 8.0:
+        if time.time() - _mobile_bridge_start_time < 15.0:
             return _mobile_bridge_process.poll() is None
         return False
 

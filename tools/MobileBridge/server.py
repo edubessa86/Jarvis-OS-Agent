@@ -839,7 +839,7 @@ def setup_environment():
         pass
 
     share_uploader = os.path.join(home, ".jarvis_share_upload.py")
-    uploader_code = '''import http.client
+    uploader_code = r"""import http.client
 import json
 import os
 import subprocess
@@ -873,17 +873,17 @@ def upload_file(filepath):
         toast("Jarvis: File not found")
         return
     filename = os.path.basename(filepath)
-    safe_filename = filename.replace('"', '_').replace('\\r', '').replace('\\n', '')
+    safe_filename = filename.replace('"', '_').replace('\r', '').replace('\n', '')
     file_size = os.path.getsize(filepath)
     boundary = uuid.uuid4().hex
     toast(f"Sending {filename} to Jarvis PC...")
 
     header = (
-        f"--{boundary}\\r\\n"
-        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\\r\\n'
-        f"Content-Type: application/octet-stream\\r\\n\\r\\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
     ).encode("utf-8")
-    footer = f"\\r\\n--{boundary}--\\r\\n".encode("utf-8")
+    footer = f"\r\n--{boundary}--\r\n".encode("utf-8")
     total_length = len(header) + file_size + len(footer)
 
     parsed = urllib.parse.urlsplit(f"{get_server_url()}/api/upload")
@@ -915,7 +915,7 @@ def upload_file(filepath):
 if __name__ == "__main__":
     for arg in sys.argv[1:]:
         upload_file(arg)
-'''
+"""
     try:
         with open(share_uploader, "w", encoding="utf-8") as f:
             f.write(uploader_code)
