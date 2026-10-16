@@ -174,13 +174,119 @@ class StatusOrb(QWidget):
             path.lineTo(7.2, 15.2)
             painter.drawPath(path)
             painter.drawLine(QPointF(12.6, 15.2), QPointF(16.5, 15.2))
-        elif self.mode in ("gui", "vision"):
+        elif self.mode == "python":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            path = QPainterPath()
+            path.moveTo(9.5, 8.5)
+            path.lineTo(6.5, 12.0)
+            path.lineTo(9.5, 15.5)
+            painter.drawPath(path)
+            path = QPainterPath()
+            path.moveTo(14.5, 8.5)
+            path.lineTo(17.5, 12.0)
+            path.lineTo(14.5, 15.5)
+            painter.drawPath(path)
+            painter.drawLine(QPointF(13.0, 9.0), QPointF(11.0, 15.0))
+        elif self.mode == "gui":
             painter.setPen(core_pen)
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(QRectF(6.2, 6.2, 11.6, 11.6), 3.2, 3.2)
             painter.setBrush(QColor(r, g, b, 255))
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(center, 2.3, 2.3)
+        elif self.mode == "memory":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(QPointF(9.0, 9.0), QPointF(15.0, 9.0))
+            painter.drawLine(QPointF(9.0, 9.0), QPointF(12.0, 15.5))
+            painter.drawLine(QPointF(15.0, 9.0), QPointF(12.0, 15.5))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(r, g, b, 245))
+            painter.drawEllipse(QPointF(9.0, 9.0), 2.0, 2.0)
+            painter.drawEllipse(QPointF(15.0, 9.0), 2.0, 2.0)
+            painter.drawEllipse(QPointF(12.0, 15.5), 2.0, 2.0)
+        elif self.mode == "file_ops":
+            painter.setPen(core_pen)
+            painter.setBrush(QColor(r, g, b, 85))
+            path = QPainterPath()
+            path.moveTo(6.5, 9.0)
+            path.lineTo(10.5, 9.0)
+            path.lineTo(11.5, 10.5)
+            path.lineTo(17.5, 10.5)
+            path.lineTo(17.5, 16.5)
+            path.lineTo(6.5, 16.5)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif self.mode == "mobile":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(8.0, 6.0, 8.0, 12.5), 1.8, 1.8)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(r, g, b, 245))
+            painter.drawEllipse(QPointF(12.0, 16.0), 0.9, 0.9)
+        elif self.mode == "file_transfer":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(QPointF(7.0, 10.0), QPointF(17.0, 10.0))
+            path = QPainterPath()
+            path.moveTo(15.0, 8.5)
+            path.lineTo(17.0, 10.0)
+            path.lineTo(15.0, 11.5)
+            painter.drawPath(path)
+            painter.drawLine(QPointF(17.0, 14.0), QPointF(7.0, 14.0))
+            path = QPainterPath()
+            path.moveTo(9.0, 12.5)
+            path.lineTo(7.0, 14.0)
+            path.lineTo(9.0, 15.5)
+            painter.drawPath(path)
+        elif self.mode == "image_gen":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(6.5, 7.5, 11.0, 9.5), 1.5, 1.5)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(r, g, b, 245))
+            painter.drawEllipse(QPointF(9.5, 10.5), 1.1, 1.1)
+            path = QPainterPath()
+            path.moveTo(7.0, 16.0)
+            path.lineTo(11.0, 12.5)
+            path.lineTo(13.5, 14.5)
+            path.lineTo(15.0, 13.0)
+            path.lineTo(17.0, 16.0)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif self.mode == "clipboard":
+            painter.setPen(core_pen)
+            painter.setBrush(QColor(r, g, b, 85))
+            painter.drawRoundedRect(QRectF(7.0, 8.0, 10.0, 10.0), 1.8, 1.8)
+            painter.setBrush(QColor(r, g, b, 245))
+            painter.drawRoundedRect(QRectF(9.5, 6.5, 5.0, 2.5), 1.0, 1.0)
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.0))
+            painter.drawLine(QPointF(9.0, 11.5), QPointF(15.0, 11.5))
+            painter.drawLine(QPointF(9.0, 14.0), QPointF(15.0, 14.0))
+        elif self.mode == "calendar":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(6.5, 8.0, 11.0, 9.5), 1.5, 1.5)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(r, g, b, 245))
+            painter.drawRect(QRectF(6.5, 8.0, 11.0, 2.5))
+            painter.drawEllipse(QPointF(9.5, 13.0), 0.8, 0.8)
+            painter.drawEllipse(QPointF(12.0, 13.0), 0.8, 0.8)
+            painter.drawEllipse(QPointF(14.5, 13.0), 0.8, 0.8)
+            painter.drawEllipse(QPointF(9.5, 15.5), 0.8, 0.8)
+            painter.drawEllipse(QPointF(12.0, 15.5), 0.8, 0.8)
+            painter.drawEllipse(QPointF(14.5, 15.5), 0.8, 0.8)
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawLine(QPointF(9.0, 6.5), QPointF(9.0, 8.0))
+            painter.drawLine(QPointF(15.0, 6.5), QPointF(15.0, 8.0))
+        elif self.mode == "workspace":
+            painter.setPen(core_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(QRectF(6.0, 7.0, 12.0, 9.0), 1.5, 1.5)
+            painter.drawLine(QPointF(12.0, 16.0), QPointF(12.0, 17.5))
+            painter.drawLine(QPointF(9.0, 17.5), QPointF(15.0, 17.5))
         elif self.mode == "done":
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(50, 215, 75, 235))
@@ -802,15 +908,16 @@ class AgentPanel(QWidget):
         color_map = {
             "search": [10, 132, 255],
             "deep_task": [255, 55, 95],
+            "python": [48, 130, 200],
             "thinking": [191, 90, 242],
             "workspace": [255, 159, 10],
             "communication": [48, 209, 88],
             "confirm_whatsapp": [37, 211, 102],
             "confirm_telegram": [0, 152, 234],
             "confirm_email": [255, 159, 10],
-            "vision": [100, 210, 255],
             "gui": [94, 92, 230],
             "mobile": [0, 212, 178],
+            "file_transfer": [0, 180, 160],
             "file_ops": [255, 214, 10],
             "terminal": [50, 215, 75],
             "memory": [175, 82, 222],
@@ -1135,18 +1242,15 @@ class AgentPanel(QWidget):
             "telegram_action": ("Telegram", "confirm_telegram"),
             "image_command": ("Image Studio", "image_gen"),
             "clipboard_action": ("Clipboard", "clipboard"),
-            "vision": ("Vision Engine", "vision"),
             "file_operations": ("Files & Code", "file_ops"),
-            "file_transfer_action": ("Wi-Fi Transfer", "mobile"),
+            "file_transfer_action": ("Wi-Fi Transfer", "file_transfer"),
             "mobile_action": ("Mobile Bridge", "mobile"),
             "gui_controller": ("Screen Control", "gui"),
             "system_controller": ("System Control", "workspace"),
             "memory_actions": ("Memory Graph", "memory"),
             "calendar_action": ("Calendar", "calendar"),
             "execute_terminal_command": ("Terminal", "terminal"),
-            "run_python_code": ("Python Engine", "deep_task"),
-            "apps_to_open": ("Opening App", "workspace"),
-            "urls_to_open": ("Opening Link", "workspace"),
+            "run_python_code": ("Python Engine", "python"),
             "ABORT": ("Task Aborted", "deep_task"),
         }
 
