@@ -5,9 +5,14 @@ import re
 import os
 from collections import OrderedDict
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PyQt5.QtCore import Qt, QUrl, QTimer
+from PyQt5.QtCore import Qt, QUrl, QTimer, QRectF, QPointF
 from PyQt5.QtWidgets import QTextBrowser, QFrame, QSizePolicy
-from PyQt5.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QTextDocument, QPalette, QDesktopServices, QFont, QFontMetrics
+from PyQt5.QtGui import (
+    QColor, QImage, QPainter, QPainterPath, QPen,
+    QTextDocument, QPalette, QDesktopServices, QFont,
+    QFontMetrics, QLinearGradient
+)
+
 
 class AsyncTextBrowser(QTextBrowser):
     def __init__(self, parent_popup):
@@ -20,7 +25,7 @@ class AsyncTextBrowser(QTextBrowser):
         self.pending_requests = set()
         self.MAX_CACHE_SIZE = 100
         self.CACHE_TTL = 30
-        
+
         self.cache_dir = "Data/cache"
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir, exist_ok=True)
@@ -30,13 +35,13 @@ class AsyncTextBrowser(QTextBrowser):
             try:
                 with open(self.meta_cache_file, "r", encoding="utf-8") as f:
                     self.meta_cache = json.load(f)
-            except:
+            except Exception:
                 pass
-        
+
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
         self.anchorClicked.connect(self.handle_link_click)
-        
+
         self.setFrameShape(QFrame.NoFrame)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -44,32 +49,34 @@ class AsyncTextBrowser(QTextBrowser):
         self.setStyleSheet("background: transparent; border: none; outline: none;")
 
         palette = self.palette()
-        palette.setColor(QPalette.Highlight, QColor(191, 90, 242, 100))
+        palette.setColor(QPalette.Highlight, QColor(191, 90, 242, 110))
         palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255, 255))
         self.setPalette(palette)
 
     def handle_link_click(self, url):
         QDesktopServices.openUrl(url)
 
-    def _create_placeholder(self, text, w=380, h=300):
-        img = QImage(w, h, QImage.Format_ARGB32)
+    def _create_placeholder(self, text, w=420, h=240):
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         painter = QPainter(img)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
         path = QPainterPath()
-        path.addRoundedRect(1.5, 1.5, w - 3, h - 3, 10, 10)
-        painter.fillPath(path, QColor(40, 40, 45, 150))
-        
-        painter.setPen(QColor(160, 160, 165))
-        font = painter.font()
-        font.setPointSize(11)
-        font.setBold(True)
+        path.addRoundedRect(rect, 14.0, 14.0)
+
+        grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        grad.setColorAt(0.0, QColor(34, 35, 44, 210))
+        grad.setColorAt(1.0, QColor(20, 21, 27, 230))
+        painter.fillPath(path, grad)
+
+        painter.setPen(QColor(175, 175, 190))
+        font = QFont(getattr(self.parent_popup, "eng_font", "Segoe UI"), 10, QFont.DemiBold)
         painter.setFont(font)
         painter.drawText(img.rect(), Qt.AlignCenter, text)
-        
-        pen = QPen(QColor(255, 255, 255, 50))
-        pen.setWidthF(1.5)
+
+        pen = QPen(QColor(255, 255, 255, 32), 1.2)
         painter.strokePath(path, pen)
         painter.end()
         return img
@@ -78,37 +85,37 @@ class AsyncTextBrowser(QTextBrowser):
         try:
             with open(self.meta_cache_file, "w", encoding="utf-8") as f:
                 json.dump(self.meta_cache, f)
-        except:
+        except Exception:
             pass
 
     def loadResource(self, type, name):
         if type == QTextDocument.ImageResource:
             url = name.toString()
             current_time = time.time()
-            
+
             if url in self.failed_urls:
                 if current_time - self.failed_urls[url] < self.CACHE_TTL:
-                    return self._create_placeholder("Preview Unavailable")
+                    return self._create_placeholder("Preview Unavailable", h=180)
                 else:
                     del self.failed_urls[url]
 
             if url in self.image_cache:
                 self.image_cache.move_to_end(url)
                 return self.image_cache[url]
-            
+
             if url in self.pending_requests:
-                return self._create_placeholder("Loading...")
-            
+                return self._create_placeholder("Loading Preview...", h=220)
+
             self.pending_requests.add(url)
-            
-            if url.startswith('preview://'):
+
+            if url.startswith("preview://"):
                 actual_url = url[10:]
                 if actual_url in self.meta_cache:
                     meta = self.meta_cache[actual_url]
-                    img_url = meta.get('img_url')
+                    img_url = meta.get("img_url")
                     if img_url:
                         self._request_image(img_url, url, meta)
-                        return self._create_placeholder("Loading Image...", h=300)
+                        return self._create_placeholder("Loading Preview...", h=280)
                     else:
                         self.pending_requests.discard(url)
                         styled = self._draw_card(None, url, meta)
@@ -122,29 +129,29 @@ class AsyncTextBrowser(QTextBrowser):
                 reply.setProperty("is_microlink", True)
                 reply.setProperty("original_url", url)
                 reply.setProperty("actual_url", actual_url)
-                return self._create_placeholder("Fetching Preview...", h=300)
-                
-            elif url.startswith('http'):
+                return self._create_placeholder("Fetching Link Preview...", h=280)
+
+            elif url.startswith("http"):
                 req = QNetworkRequest(QUrl(url))
                 req.setRawHeader(b"User-Agent", b"Mozilla/5.0")
                 reply = self.network_manager.get(req)
                 reply.setProperty("is_direct_image", True)
                 reply.setProperty("original_url", url)
-                return self._create_placeholder("Loading Image...", h=214)
-                
-            elif url.startswith('file://'):
+                return self._create_placeholder("Loading Media...", h=236)
+
+            elif url.startswith("file://"):
                 local_path = QUrl(url).toLocalFile()
                 raw_image = QImage(local_path)
                 self.pending_requests.discard(url)
-                
+
                 if not raw_image.isNull():
                     styled_img = self._style_simple_image(raw_image, url)
                     self._cache_and_update(url, styled_img)
                     return styled_img
                 else:
                     self.failed_urls[url] = current_time
-                    return self._create_placeholder("File Not Found", h=214)
-                
+                    return self._create_placeholder("Local Image Not Found", h=180)
+
         return super().loadResource(type, name)
 
     def _request_image(self, img_url, original_url, meta_data=None):
@@ -164,104 +171,105 @@ class AsyncTextBrowser(QTextBrowser):
         self._trigger_debounced_reflow()
 
     def _style_simple_image(self, raw_image, url):
-        if raw_image.width() > 380:
-            raw_image = raw_image.scaledToWidth(380, Qt.SmoothTransformation)
+        target_w = 420
+        if raw_image.width() > target_w:
+            raw_image = raw_image.scaledToWidth(target_w, Qt.SmoothTransformation)
         w, h = raw_image.width(), raw_image.height()
-        
+
         styled_img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         styled_img.fill(Qt.transparent)
         painter = QPainter(styled_img)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
         path = QPainterPath()
-        path.addRoundedRect(1.5, 1.5, w - 3, h - 3, 10, 10)
-        painter.fillPath(path, QColor(240, 240, 245))
+        path.addRoundedRect(rect, 14.0, 14.0)
+        painter.fillPath(path, QColor(22, 23, 28))
         painter.setClipPath(path)
         painter.drawImage(0, 0, raw_image)
         painter.setClipping(False)
 
         if "img.youtube.com" in url:
-            pill_w, pill_h = 50, 36
-            pill_x, pill_y = (w - pill_w) / 2, (h - pill_h) / 2
+            pill_w, pill_h = 56, 38
+            pill_x, pill_y = (w - pill_w) / 2.0, (h - pill_h) / 2.0
             path_pill = QPainterPath()
-            path_pill.addRoundedRect(pill_x, pill_y, pill_w, pill_h, 8, 8)
-            painter.fillPath(path_pill, QColor(255, 0, 0, 220))
+            path_pill.addRoundedRect(pill_x, pill_y, pill_w, pill_h, 10.0, 10.0)
+            painter.fillPath(path_pill, QColor(255, 15, 35, 230))
             triangle = QPainterPath()
-            tx, ty = pill_x + 20, pill_y + 10
+            tx, ty = pill_x + 22.0, pill_y + 11.0
             triangle.moveTo(tx, ty)
-            triangle.lineTo(tx + 14, ty + 8)
-            triangle.lineTo(tx, ty + 16)
+            triangle.lineTo(tx + 15.0, ty + 8.0)
+            triangle.lineTo(tx, ty + 16.0)
             triangle.closeSubpath()
             painter.fillPath(triangle, QColor(255, 255, 255))
 
-        pen = QPen(QColor(255, 255, 255, 50))
-        pen.setWidthF(1.5)
+        pen = QPen(QColor(255, 255, 255, 42), 1.3)
         painter.strokePath(path, pen)
         painter.end()
         return styled_img
 
     def _draw_card(self, raw_image, url, meta):
-        w, h = 380, 300
-        img_h = 200
+        w, h = 420, 286
+        img_h = 192
         if raw_image is None or raw_image.isNull():
-            raw_image = QImage(w, img_h, QImage.Format_ARGB32)
-            raw_image.fill(QColor(40, 40, 45))
+            raw_image = QImage(w, img_h, QImage.Format_ARGB32_Premultiplied)
+            raw_image.fill(QColor(32, 33, 42))
         else:
             raw_image = raw_image.scaled(w, img_h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        
+
         styled_img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
         styled_img.fill(Qt.transparent)
         painter = QPainter(styled_img)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        rect = QRectF(1.5, 1.5, w - 3.0, h - 3.0)
         path = QPainterPath()
-        path.addRoundedRect(1.5, 1.5, w - 3, h - 3, 10, 10)
-        painter.fillPath(path, QColor(26, 26, 29))
+        path.addRoundedRect(rect, 14.0, 14.0)
+        painter.fillPath(path, QColor(22, 23, 30, 248))
         painter.setClipPath(path)
-        
+
         img_rect = raw_image.rect()
         img_x = (w - img_rect.width()) // 2
         img_y = (img_h - img_rect.height()) // 2
         painter.drawImage(img_x, img_y, raw_image)
-        
+
         painter.setClipping(False)
-        
-        title = meta.get('title') or 'Unknown Link'
-        desc = meta.get('description') or ''
-        domain = meta.get('domain') or ''
-        
-        painter.setPen(QColor(255, 255, 255))
-        font = painter.font()
-        font.setPointSize(11)
-        font.setBold(True)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-        elided_title = fm.elidedText(title, Qt.ElideRight, w - 24)
-        painter.drawText(12, img_h + 26, elided_title)
-        
-        painter.setPen(QColor(160, 160, 165))
-        font.setPointSize(9)
-        font.setBold(False)
-        painter.setFont(font)
-        fm_desc = QFontMetrics(font)
-        elided_desc = fm_desc.elidedText(desc, Qt.ElideRight, w - 24)
-        painter.drawText(12, img_h + 52, elided_desc)
-        
-        font.setPointSize(8)
-        painter.setFont(font)
-        domain_text = f"🔗 {domain}" if domain else ""
-        painter.drawText(12, img_h + 82, domain_text)
-        
-        pen = QPen(QColor(255, 255, 255, 30))
-        pen.setWidthF(1.5)
+
+        title = meta.get("title") or "Web Link"
+        desc = meta.get("description") or ""
+        domain = meta.get("domain") or ""
+
+        eng_font = getattr(self.parent_popup, "eng_font", "Segoe UI")
+
+        painter.setPen(QColor(255, 255, 255, 245))
+        title_font = QFont(eng_font, 10, QFont.Bold)
+        painter.setFont(title_font)
+        fm_title = QFontMetrics(title_font)
+        elided_title = fm_title.elidedText(title, Qt.ElideRight, w - 28)
+        painter.drawText(14, img_h + 26, elided_title)
+
+        painter.setPen(QColor(175, 175, 190, 225))
+        desc_font = QFont(eng_font, 9, QFont.Normal)
+        painter.setFont(desc_font)
+        fm_desc = QFontMetrics(desc_font)
+        elided_desc = fm_desc.elidedText(desc, Qt.ElideRight, w - 28)
+        painter.drawText(14, img_h + 50, elided_desc)
+
+        if domain:
+            painter.setPen(QColor(196, 138, 249, 230))
+            dom_font = QFont(eng_font, 8, QFont.DemiBold)
+            painter.setFont(dom_font)
+            painter.drawText(14, img_h + 75, f"{domain} ↗")
+
+        pen = QPen(QColor(255, 255, 255, 34), 1.2)
         painter.strokePath(path, pen)
-        
-        line_pen = QPen(QColor(255, 255, 255, 20))
+
+        line_pen = QPen(QColor(255, 255, 255, 22), 1.0)
         painter.setPen(line_pen)
-        painter.drawLine(0, img_h, w, img_h)
-        
+        painter.drawLine(QPointF(1.5, float(img_h)), QPointF(float(w - 1.5), float(img_h)))
+
         painter.end()
         return styled_img
 
@@ -272,7 +280,7 @@ class AsyncTextBrowser(QTextBrowser):
         if not self.isVisible() or self.document() is None:
             reply.deleteLater()
             return
-            
+
         url = reply.request().url().toString()
         is_microlink = reply.property("is_microlink")
         is_fallback = reply.property("is_fallback")
@@ -281,14 +289,18 @@ class AsyncTextBrowser(QTextBrowser):
         actual_url = reply.property("actual_url")
         meta_data = reply.property("meta_data")
         current_time = time.time()
-        
+
         target_cleanup_url = original_url if original_url else url
-        
+
         content_length = reply.header(QNetworkRequest.ContentLengthHeader)
         if content_length and int(content_length) > 5 * 1024 * 1024:
             self.pending_requests.discard(target_cleanup_url)
             self.failed_urls[target_cleanup_url] = current_time
-            self.document().addResource(QTextDocument.ImageResource, QUrl(target_cleanup_url), self._create_placeholder("File Too Large"))
+            self.document().addResource(
+                QTextDocument.ImageResource,
+                QUrl(target_cleanup_url),
+                self._create_placeholder("Media File Too Large", h=180),
+            )
             self._trigger_debounced_reflow()
             reply.deleteLater()
             return
@@ -305,7 +317,7 @@ class AsyncTextBrowser(QTextBrowser):
                 return
             elif is_fallback:
                 self.pending_requests.discard(target_cleanup_url)
-                meta = {'title': actual_url, 'domain': urllib.parse.urlparse(actual_url).netloc}
+                meta = {"title": actual_url, "domain": urllib.parse.urlparse(actual_url).netloc}
                 styled = self._draw_card(None, original_url, meta)
                 self._cache_and_update(original_url, styled)
                 reply.deleteLater()
@@ -321,23 +333,32 @@ class AsyncTextBrowser(QTextBrowser):
             else:
                 self.pending_requests.discard(target_cleanup_url)
                 self.failed_urls[target_cleanup_url] = current_time
-                self.document().addResource(QTextDocument.ImageResource, QUrl(target_cleanup_url), self._create_placeholder("Image Load Failed"))
+                self.document().addResource(
+                    QTextDocument.ImageResource,
+                    QUrl(target_cleanup_url),
+                    self._create_placeholder("Preview Unavailable", h=180),
+                )
                 self._trigger_debounced_reflow()
                 reply.deleteLater()
                 return
 
         if is_microlink:
             try:
-                data = json.loads(reply.readAll().data().decode('utf-8'))
-                img_url = data.get('data', {}).get('image', {}).get('url')
-                title = data.get('data', {}).get('title')
-                desc = data.get('data', {}).get('description')
-                domain = data.get('data', {}).get('publisher') or urllib.parse.urlparse(actual_url).netloc
-                
-                meta = {'title': title or actual_url, 'description': desc or '', 'domain': domain, 'img_url': img_url}
+                data = json.loads(reply.readAll().data().decode("utf-8"))
+                img_url = data.get("data", {}).get("image", {}).get("url")
+                title = data.get("data", {}).get("title")
+                desc = data.get("data", {}).get("description")
+                domain = data.get("data", {}).get("publisher") or urllib.parse.urlparse(actual_url).netloc
+
+                meta = {
+                    "title": title or actual_url,
+                    "description": desc or "",
+                    "domain": domain,
+                    "img_url": img_url,
+                }
                 self.meta_cache[actual_url] = meta
                 self.save_meta_cache()
-                
+
                 if img_url:
                     self._request_image(img_url, original_url, meta)
                 else:
@@ -355,22 +376,30 @@ class AsyncTextBrowser(QTextBrowser):
             return
 
         if is_fallback:
-            html = reply.readAll().data().decode('utf-8', errors='ignore')
-            title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
-            desc_match = re.search(r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-            img_match = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-            
-            title = title_match.group(1).strip() if title_match else actual_url
+            html = reply.readAll().data().decode("utf-8", errors="ignore")
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+            desc_match = re.search(
+                r'<meta\s+property=["\']og:description["\']\s+content=["\'](.*?)["\']',
+                html,
+                re.IGNORECASE,
+            )
+            img_match = re.search(
+                r'<meta\s+property=["\']og:image["\']\s+content=["\'](.*?)["\']',
+                html,
+                re.IGNORECASE,
+            )
+
+            title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else actual_url
             desc = desc_match.group(1).strip() if desc_match else ""
             img_url = img_match.group(1).strip() if img_match else None
             domain = urllib.parse.urlparse(actual_url).netloc
-            
-            meta = {'title': title, 'description': desc, 'domain': domain, 'img_url': img_url}
+
+            meta = {"title": title, "description": desc, "domain": domain, "img_url": img_url}
             self.meta_cache[actual_url] = meta
             self.save_meta_cache()
-            
+
             if img_url:
-                if img_url.startswith('/'):
+                if img_url.startswith("/"):
                     img_url = f"https://{domain}{img_url}"
                 self._request_image(img_url, original_url, meta)
             else:
@@ -383,16 +412,20 @@ class AsyncTextBrowser(QTextBrowser):
         raw_data = reply.readAll()
         raw_image = QImage.fromData(raw_data)
         target_url = original_url or url
-        
+
         self.pending_requests.discard(target_cleanup_url)
-        
+
         if raw_image.isNull():
             if is_preview_img and meta_data:
                 styled = self._draw_card(None, target_url, meta_data)
                 self._cache_and_update(target_url, styled)
             else:
                 self.failed_urls[target_url] = current_time
-                self.document().addResource(QTextDocument.ImageResource, QUrl(target_url), self._create_placeholder("Invalid Image Data"))
+                self.document().addResource(
+                    QTextDocument.ImageResource,
+                    QUrl(target_url),
+                    self._create_placeholder("Invalid Image Data", h=180),
+                )
                 self._trigger_debounced_reflow()
             reply.deleteLater()
             return
@@ -401,6 +434,6 @@ class AsyncTextBrowser(QTextBrowser):
             styled_img = self._draw_card(raw_image, target_url, meta_data)
         else:
             styled_img = self._style_simple_image(raw_image, target_url)
-            
+
         self._cache_and_update(target_url, styled_img)
         reply.deleteLater()
