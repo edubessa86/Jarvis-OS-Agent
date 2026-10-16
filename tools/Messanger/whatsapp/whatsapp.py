@@ -1,187 +1,183 @@
 import os
-import json
 import logging
 import requests
 from datetime import datetime
 
-CONTACTS_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
-    "Data",
-    "contacts.json"
-)
 
-def load_contacts():
-    if not os.path.exists(CONTACTS_FILE):
-        logging.warning(f"⚠️ contacts.json file not found at path: {CONTACTS_FILE}")
-        return {}
+def _sanitize_phone_number(raw_target: str):
+    if not raw_target or not str(raw_target).strip():
+        return None, "[ERROR] ❌ Target phone number is required."
 
-    try:
-        with open(CONTACTS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        logging.error(f"❌ [CRITICAL] contacts.json is corrupted or has an invalid format: {e}")
-        return {}
-    except Exception as e:
-        logging.error(f"❌ [ERROR] Failed to load contacts: {e}")
-        return {}
+    clean_target = str(raw_target).strip()
+    cleaned_num = (
+        clean_target.replace("+", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+    )
+
+    if cleaned_num.startswith("00"):
+        cleaned_num = cleaned_num[2:]
+    elif len(cleaned_num) == 11 and cleaned_num.startswith("0"):
+        cleaned_num = cleaned_num[1:]
+
+    if not cleaned_num.isdigit() or len(cleaned_num) < 10 or len(cleaned_num) > 15:
+        return (
+            None,
+            f"[ERROR] ❌ Invalid phone number '{clean_target}'. Only numeric phone numbers are supported (contact names are not accepted). Please retrieve the contact's phone number using 'memory_actions' first or ask the user.",
+        )
+
+    if len(cleaned_num) == 10:
+        target_number = "91" + cleaned_num
+        logging.info(f"🔢 10-Digit number detected, added default country code '91': {target_number}")
+    else:
+        target_number = cleaned_num
+        logging.info(f"🔢 Direct number detected: {target_number}")
+
+    return target_number, None
+
 
 def send_whatsapp_message(to_target: str, message: str = "", attachment_path: str = None) -> str:
-    if not to_target:
-        return "❌ Error: Target (Name or Number) is required."
+    target_number, err = _sanitize_phone_number(to_target)
+    if err:
+        logging.error(err)
+        return err
 
-    if not message and not attachment_path:
-        return "❌ Error: Both message text and attachment cannot be empty."
+    clean_message = (message or "").strip()
+    clean_attachment = attachment_path.strip() if isinstance(attachment_path, str) and attachment_path.strip() else None
 
-    clean_target = to_target.strip()
-    target_number = None
+    if not clean_message and not clean_attachment:
+        return "[ERROR] ❌ Both message text and attachment cannot be empty."
 
-    cleaned_num = clean_target.replace("+", "").replace(" ", "").replace("-", "")
-
-    if cleaned_num.isdigit():
-        if len(cleaned_num) == 10:
-            target_number = "91" + cleaned_num
-            logging.info(f"🔢 10-Digit number detected, added default country code '91': {target_number}")
-        else:
-            target_number = cleaned_num
-            logging.info(f"🔢 Direct number detected: {target_number}")
-    else:
-        contacts = load_contacts()
-        target_number = contacts.get(clean_target.lower())
-        if not target_number:
-            return f"❌ Number for '{clean_target}' not found in contacts.json, and it is not a valid direct number."
-        logging.info(f"👤 Contact detected: {clean_target} -> {target_number}")
-
-    if attachment_path:
-        if not os.path.exists(attachment_path):
-            error_msg = f"❌ Workspace file not found: {attachment_path}"
+    if clean_attachment:
+        clean_attachment = os.path.abspath(clean_attachment)
+        if not os.path.isfile(clean_attachment):
+            error_msg = f"[ERROR] ❌ Workspace file not found: {clean_attachment}"
             logging.error(error_msg)
             return error_msg
 
-        if not os.access(attachment_path, os.R_OK):
-            error_msg = f"❌ Missing read permission for file: {attachment_path}"
+        if not os.access(clean_attachment, os.R_OK):
+            error_msg = f"[ERROR] ❌ Missing read permission for file: {clean_attachment}"
             logging.error(error_msg)
             return error_msg
 
     local_baileys_url = "http://localhost:3000/send"
+    req_timeout = 60 if clean_attachment else 20
 
     payload = {
         "number": target_number,
-        "message": message,
-        "file_path": attachment_path
+        "message": clean_message,
+        "file_path": clean_attachment,
     }
 
     try:
-        logging.info(f"🚀 Sending command to local Baileys bridge for {clean_target}...")
+        logging.info(f"🚀 Sending command to local Baileys bridge for {target_number}...")
 
-        response = requests.post(local_baileys_url, json=payload, timeout=20)
+        response = requests.post(local_baileys_url, json=payload, timeout=req_timeout)
 
         if response.status_code == 200:
-            status_text = "✅ WhatsApp message (with attachment)" if attachment_path else "✅ WhatsApp message"
-            success_text = f"{status_text} successfully sent to {clean_target} via Baileys."
+            status_text = "✅ WhatsApp message (with attachment)" if clean_attachment else "✅ WhatsApp message"
+            success_text = f"{status_text} successfully sent to {target_number} via Baileys."
             logging.info(success_text)
             return success_text
         else:
-            error_text = f"❌ Baileys Server Error (Code {response.status_code}): {response.text}"
+            error_text = f"[ERROR] ❌ Baileys Server Error (Code {response.status_code}): {response.text}"
             logging.error(error_text)
             return error_text
 
     except requests.exceptions.ConnectionError:
-        error_msg = "❌ Node.js server is offline! Please start 'node baileys_service.js' in the BaileysServer directory first."
+        error_msg = "[ERROR] ❌ Node.js server is offline! Please start 'node baileys_service.js' in the BaileysServer directory first."
         logging.error(error_msg)
         return error_msg
     except requests.exceptions.Timeout:
-        error_msg = "❌ Timeout Error: Node.js server did not respond within 20 seconds. The engine might be hanging."
+        error_msg = f"[ERROR] ❌ Timeout Error: Node.js server did not respond within {req_timeout} seconds."
         logging.error(error_msg)
         return error_msg
     except requests.exceptions.RequestException as e:
-        error_msg = f"❌ API Request failed: {e}"
+        error_msg = f"[ERROR] ❌ API Request failed: {e}"
         logging.error(error_msg)
         return error_msg
     except Exception as e:
-        error_msg = f"❌ Unexpected Python Error: {e}"
+        error_msg = f"[ERROR] ❌ Unexpected Python Error: {e}"
         logging.error(error_msg)
         return error_msg
 
+
 def fetch_whatsapp_chats(to_target: str, start_date: str, end_date: str) -> str:
     if not to_target or not start_date or not end_date:
-        return "❌ Error: Target, start_date, and end_date are all required."
+        return "[ERROR] ❌ Target phone number, start_date, and end_date are all required."
 
-    clean_target = to_target.strip()
-    target_number = None
-
-    cleaned_num = clean_target.replace("+", "").replace(" ", "").replace("-", "")
-
-    if cleaned_num.isdigit():
-        if len(cleaned_num) == 10:
-            target_number = "91" + cleaned_num
-        else:
-            target_number = cleaned_num
-    else:
-        contacts = load_contacts()
-        target_number = contacts.get(clean_target.lower())
-        if not target_number:
-            return f"❌ Number for '{clean_target}' not found in contacts.json, and it is not a valid direct number."
+    target_number, err = _sanitize_phone_number(to_target)
+    if err:
+        logging.error(err)
+        return err
 
     logging.info(f"📱 Fetching chats for numeric ID: {target_number}")
 
     try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        start_timestamp = int(start_dt.timestamp())
+        start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d")
 
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-        end_dt = end_dt.replace(hour=23, minute=59, second=59)
-        end_timestamp = int(end_dt.timestamp())
+        if start_dt > end_dt:
+            start_dt, end_dt = end_dt, start_dt
+            start_date, end_date = end_date, start_date
+
+        start_timestamp = int(start_dt.replace(hour=0, minute=0, second=0).timestamp())
+        end_timestamp = int(end_dt.replace(hour=23, minute=59, second=59).timestamp())
     except ValueError:
-        return "❌ Error: Invalid date format. Please use YYYY-MM-DD exactly."
+        return "[ERROR] ❌ Invalid date format. Please use YYYY-MM-DD exactly."
 
     local_baileys_url = "http://localhost:3000/fetch-chats"
 
     payload = {
         "number": target_number,
         "start_timestamp": start_timestamp,
-        "end_timestamp": end_timestamp
+        "end_timestamp": end_timestamp,
     }
 
     try:
-        logging.info(f"📥 Sending fetch request to Baileys bridge for {clean_target}...")
+        logging.info(f"📥 Sending fetch request to Baileys bridge for {target_number}...")
 
-        response = requests.post(local_baileys_url, json=payload, timeout=20)
+        response = requests.post(local_baileys_url, json=payload, timeout=25)
 
         if response.status_code == 200:
             data = response.json()
             messages = data.get("messages", [])
 
             if not messages:
-                return f"Observation: No conversation history found with {clean_target} between {start_date} and {end_date}."
+                return f"Observation: No conversation history found with {target_number} between {start_date} and {end_date}."
 
-            chat_lines = [f"📱 [CHAT HISTORY WITH {clean_target.upper()} | {start_date} to {end_date}]"]
+            chat_lines = [f"📱 [CHAT HISTORY WITH {target_number} | {start_date} to {end_date}]"]
             for msg in messages:
-                sender = "Me (Jarvis)" if msg.get("fromMe") else clean_target.capitalize()
-                msg_time = datetime.fromtimestamp(msg.get("timestamp")).strftime("%d %b, %H:%M")
-                text = msg.get("text", "[Media/Unknown]")
+                sender = "Me (Jarvis)" if msg.get("fromMe") else target_number
+                ts = msg.get("timestamp") or 0
+                msg_time = datetime.fromtimestamp(ts).strftime("%d %b, %H:%M")
+                text = msg.get("text") or "[Media/Unknown]"
                 chat_lines.append(f"[{msg_time}] {sender}: {text}")
 
             success_text = "\n".join(chat_lines)
             logging.info(f"✅ Fetched {len(messages)} messages successfully.")
             return success_text
         else:
-            error_text = f"❌ Baileys Server Error (Code {response.status_code}): {response.text}"
+            error_text = f"[ERROR] ❌ Baileys Server Error (Code {response.status_code}): {response.text}"
             logging.error(error_text)
             return error_text
 
     except requests.exceptions.ConnectionError:
-        error_msg = "❌ Node.js server is offline! Please start 'node baileys_service.js' in the BaileysServer directory first."
+        error_msg = "[ERROR] ❌ Node.js server is offline! Please start 'node baileys_service.js' in the BaileysServer directory first."
         logging.error(error_msg)
         return error_msg
     except requests.exceptions.Timeout:
-        error_msg = "❌ Timeout Error: Node.js server did not respond within 20 seconds."
+        error_msg = "[ERROR] ❌ Timeout Error: Node.js server did not respond within 25 seconds."
         logging.error(error_msg)
         return error_msg
     except requests.exceptions.RequestException as e:
-        error_msg = f"❌ API Request failed: {e}"
+        error_msg = f"[ERROR] ❌ API Request failed: {e}"
         logging.error(error_msg)
         return error_msg
     except Exception as e:
-        error_msg = f"❌ Unexpected Python Error: {e}"
+        error_msg = f"[ERROR] ❌ Unexpected Python Error: {e}"
         logging.error(error_msg)
         return error_msg

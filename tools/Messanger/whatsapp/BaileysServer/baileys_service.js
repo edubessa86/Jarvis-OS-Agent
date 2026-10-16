@@ -19,6 +19,7 @@ const qrcode = require('qrcode');
 const fs = require('fs');
 const pino = require('pino');
 const path = require('path');
+const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
 const { exec } = require('child_process');
 
@@ -28,7 +29,7 @@ const fetchChatsController = require('./Controllers/fetchChats');
 process.on('uncaughtException', (err) => {
     console.error('🚨 [CRITICAL ERROR] Uncaught Exception. Engine is still running:', err.message);
 });
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
     console.error('🚨 [CRITICAL ERROR] Unhandled Promise Rejection:', reason);
 });
 
@@ -36,7 +37,9 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 const PORT = 3000;
 
-let sock;
+let sock = null;
+let reconnectTimer = null;
+let isConnecting = false;
 let unreadAlerts = [];
 let sseClients = [];
 let lastQrDataUrl = null;
@@ -46,7 +49,6 @@ const SCRIPT_START_TIME = Math.floor(Date.now() / 1000);
 const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60;
 
 const sessionDir = path.join(__dirname, '..', '..', '..', '..', 'Data', 'SessionCookies');
-const os = require('os');
 const mediaVaultDir = path.join(os.homedir(), 'Documents', 'Jarvis', 'MediaVault', 'WhatsApp_Media');
 
 try {
@@ -82,9 +84,20 @@ db.serialize(() => {
     });
 });
 
+function dbRunAsync(sql, params) {
+    return new Promise((resolve) => {
+        db.run(sql, params, function (err) {
+            if (err) {
+                console.error("⚠️ [DB INSERT ERROR]:", err.message);
+            }
+            resolve();
+        });
+    });
+}
+
 function cleanupOldMessages() {
     const cutoff = Math.floor(Date.now() / 1000) - THIRTY_DAYS_SECONDS;
-    db.run("DELETE FROM Messages WHERE timestamp < ?", [cutoff], function(err) {
+    db.run("DELETE FROM Messages WHERE timestamp < ?", [cutoff], function (err) {
         if (err) {
             console.error("❌ [DB CLEANUP ERROR]:", err.message);
         } else if (this.changes > 0) {
@@ -118,53 +131,103 @@ function openBrowser(url) {
     exec(cmd, () => {});
 }
 
+function normalizeJid(msgKey) {
+    const rawJid = (msgKey.remoteJidAlt && msgKey.remoteJidAlt.endsWith('@s.whatsapp.net'))
+        ? msgKey.remoteJidAlt
+        : msgKey.remoteJid;
+    if (!rawJid) return null;
+    return rawJid.replace(/:\d+@/, '@');
+}
+
+function extractMessageText(messageObj) {
+    if (!messageObj) return "[Media Message]";
+    const inner = messageObj.ephemeralMessage?.message ||
+                  messageObj.viewOnceMessage?.message ||
+                  messageObj.viewOnceMessageV2?.message ||
+                  messageObj.documentWithCaptionMessage?.message ||
+                  messageObj;
+
+    return inner.conversation ||
+           inner.extendedTextMessage?.text ||
+           inner.imageMessage?.caption ||
+           inner.videoMessage?.caption ||
+           inner.documentMessage?.caption ||
+           "[Media Message]";
+}
+
+function extractMediaContainer(messageObj) {
+    if (!messageObj) return null;
+    const inner = messageObj.ephemeralMessage?.message ||
+                  messageObj.viewOnceMessage?.message ||
+                  messageObj.viewOnceMessageV2?.message ||
+                  messageObj.documentWithCaptionMessage?.message ||
+                  messageObj;
+
+    if (inner.imageMessage || inner.videoMessage || inner.documentMessage || inner.audioMessage) {
+        return inner;
+    }
+    return null;
+}
+
 const store = {
     bind: (ev) => {
-        const processMessages = (messages, isBulkSync = false) => {
+        const processMessages = async (messages, isBulkSync = false) => {
             try {
                 if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
                 let validMessageCount = 0;
                 let uniqueChats = new Set();
 
-                messages.forEach(async (msg) => {
+                for (const msg of messages) {
                     try {
-                        if (!msg || !msg.key || !msg.key.remoteJid) return;
+                        if (!msg || !msg.key || !msg.key.remoteJid || !msg.message) continue;
 
-                        const jid = msg.key.remoteJid;
+                        const jid = normalizeJid(msg.key);
+                        if (!jid) continue;
 
-                        if (jid.endsWith('@g.us') || jid === 'status@broadcast') {
-                            return;
+                        if (
+                            jid.endsWith('@g.us') ||
+                            jid === 'status@broadcast' ||
+                            jid.endsWith('@newsletter') ||
+                            jid.endsWith('@broadcast')
+                        ) {
+                            continue;
                         }
 
                         const id = msg.key.id;
-                        const timestamp = Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000);
+                        if (!id) continue;
+
+                        const rawTs = typeof msg.messageTimestamp === 'object' && msg.messageTimestamp !== null
+                            ? Number(msg.messageTimestamp.low || msg.messageTimestamp)
+                            : Number(msg.messageTimestamp);
+                        const timestamp = rawTs || Math.floor(Date.now() / 1000);
                         const fromMe = msg.key.fromMe ? 1 : 0;
 
-                        let text = msg.message?.conversation ||
-                                   msg.message?.extendedTextMessage?.text ||
-                                   msg.message?.imageMessage?.caption ||
-                                   msg.message?.videoMessage?.caption ||
-                                   msg.message?.documentMessage?.caption ||
-                                   "[Media Message]";
-
+                        const text = extractMessageText(msg.message);
+                        const mediaContainer = extractMediaContainer(msg.message);
                         let mediaTag = "";
-                        const isMedia = msg.message?.imageMessage || msg.message?.videoMessage || msg.message?.documentMessage || msg.message?.audioMessage;
 
-                        if (isMedia && !fromMe && !isBulkSync && timestamp >= SCRIPT_START_TIME) {
+                        if (mediaContainer && !fromMe && !isBulkSync && timestamp >= SCRIPT_START_TIME) {
                             try {
-                                const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }) });
+                                const buffer = await downloadMediaMessage(
+                                    msg,
+                                    'buffer',
+                                    {},
+                                    { logger: pino({ level: 'silent' }), reuploadRequest: sock?.updateMediaMessage }
+                                );
                                 let ext = 'bin';
-                                if (msg.message?.imageMessage) ext = 'jpg';
-                                else if (msg.message?.videoMessage) ext = 'mp4';
-                                else if (msg.message?.audioMessage) ext = 'mp3';
-                                else if (msg.message?.documentMessage) {
-                                    const fname = msg.message.documentMessage.fileName || 'doc.pdf';
-                                    ext = fname.split('.').pop() || 'pdf';
+                                if (mediaContainer.imageMessage) ext = 'jpg';
+                                else if (mediaContainer.videoMessage) ext = 'mp4';
+                                else if (mediaContainer.audioMessage) ext = 'mp3';
+                                else if (mediaContainer.documentMessage) {
+                                    const fname = mediaContainer.documentMessage.fileName || 'doc.pdf';
+                                    const parsedExt = path.extname(fname).replace('.', '').toLowerCase();
+                                    ext = parsedExt || 'pdf';
                                 }
-                                const filename = `${Date.now()}_wa.${ext}`;
+                                const safeId = String(id).replace(/[^a-zA-Z0-9_-]/g, '').slice(-10);
+                                const filename = `${Date.now()}_${safeId}_wa.${ext}`;
                                 const savePath = path.join(mediaVaultDir, filename).replace(/\\/g, '/');
-                                fs.writeFileSync(savePath, buffer);
+                                await fs.promises.writeFile(savePath, buffer);
                                 mediaTag = `\n[Media Attachment Saved]: ${savePath}`;
                                 console.log(`📎 [WA MEDIA SAVED]: ${savePath}`);
                             } catch (dlErr) {
@@ -172,40 +235,41 @@ const store = {
                             }
                         }
 
+                        const fullTextForDb = mediaTag ? `${text}${mediaTag}` : text;
+
                         if (!fromMe && !isBulkSync && timestamp >= SCRIPT_START_TIME) {
-                            let senderName = msg.pushName || `Unknown ${jid.split('@')[0]}`;
-                            unreadAlerts.push(`${senderName}: ${text}${mediaTag}`);
+                            const senderName = msg.pushName || `Unknown ${jid.split('@')[0]}`;
+                            unreadAlerts.push(`${senderName}: ${fullTextForDb}`);
                         }
 
                         validMessageCount++;
                         uniqueChats.add(jid.split('@')[0]);
 
                         const insertQuery = `INSERT OR IGNORE INTO Messages (id, phone_number, text, timestamp, from_me) VALUES (?, ?, ?, ?, ?)`;
-
-                        db.run(insertQuery, [id, jid, text, timestamp, fromMe], (err) => {});
+                        await dbRunAsync(insertQuery, [id, jid, fullTextForDb, timestamp, fromMe]);
                     } catch (msgErr) {}
-                });
+                }
 
                 if (validMessageCount > 0) {
                     if (isBulkSync) {
                         console.log(`🔄 [OFFLINE/INITIAL SYNC] Loaded ${validMessageCount} personal messages across ${uniqueChats.size} chats (Groups Ignored).`);
+                    } else if (validMessageCount === 1) {
+                        console.log(`💬 [LIVE MESSAGE] Received a new personal message from ${Array.from(uniqueChats)[0]}`);
                     } else {
-                        if (validMessageCount === 1) {
-                            console.log(`💬 [LIVE MESSAGE] Received a new personal message from ${Array.from(uniqueChats)[0]}`);
-                        } else {
-                            console.log(`⚡ [QUICK SYNC] Processed ${validMessageCount} recent personal messages from ${uniqueChats.size} chats.`);
-                        }
+                        console.log(`⚡ [QUICK SYNC] Processed ${validMessageCount} recent personal messages from ${uniqueChats.size} chats.`);
                     }
                 }
             } catch (mainErr) {}
         };
 
-        ev.on('messages.upsert', ({ messages }) => processMessages(messages, false));
+        ev.on('messages.upsert', ({ messages }) => {
+            processMessages(messages, false);
+        });
 
-        ev.on('messaging-history.set', ({ messages, progress, isLatest }) => {
+        ev.on('messaging-history.set', async ({ messages, progress, isLatest }) => {
             console.log(`\n⏳ [SYSTEM WAKING UP] Fetching pending history from WhatsApp servers...`);
             broadcast({ type: 'syncing_history', progress: typeof progress === 'number' ? progress : 0 });
-            processMessages(messages, true);
+            await processMessages(messages, true);
             if (isLatest) {
                 broadcast({ type: 'history_loaded', count: Array.isArray(messages) ? messages.length : 0 });
                 setTimeout(() => broadcast({ type: 'ready' }), 600);
@@ -214,16 +278,60 @@ const store = {
     }
 };
 
+function scheduleReconnect(delayMs) {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectToWhatsApp();
+    }, delayMs);
+}
+
 async function connectToWhatsApp() {
+    if (isConnecting) return;
+    isConnecting = true;
+
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+
     try {
+        if (sock) {
+            try {
+                sock.ev.removeAllListeners();
+                sock.ws?.close();
+            } catch (e) {}
+            sock = null;
+        }
+
         const authPath = path.join(sessionDir, 'auth_info_baileys');
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
-        sock = makeWASocket({
+        let version = undefined;
+        try {
+            const latest = await fetchLatestBaileysVersion();
+            if (latest && latest.version) {
+                version = latest.version;
+            }
+        } catch (verErr) {}
+
+        const socketConfig = {
             auth: state,
             logger: pino({ level: 'silent' }),
-            printQRInTerminal: false
-        });
+            printQRInTerminal: false,
+            browser: Browsers.windows('Desktop'),
+            syncFullHistory: false
+        };
+
+        if (version) {
+            socketConfig.version = version;
+        }
+
+        sock = makeWASocket(socketConfig);
+        isConnecting = false;
 
         store.bind(sock.ev);
 
@@ -258,15 +366,16 @@ async function connectToWhatsApp() {
                     if (statusCode === DisconnectReason.loggedOut) {
                         console.log('❌ [LOGGED OUT] Device has been logged out from WhatsApp Web. Please delete session folder and rescan.');
                         broadcast({ type: 'logged_out' });
+                        return;
                     } else if (statusCode === 440) {
                         console.log('⚠️ [CONFLICT - 440] WhatsApp Web is open elsewhere. Jarvis is waiting 10s to avoid spam...');
                         broadcast({ type: 'disconnected', reason: 'Session conflict — WhatsApp Web open elsewhere. Reconnecting in 10s...' });
-                        setTimeout(connectToWhatsApp, 10000);
+                        scheduleReconnect(10000);
                         return;
                     } else if (statusCode === DisconnectReason.timedOut) {
                         console.log('⚠️ [TIMEOUT] Connection is slow, attempting to reconnect in 5s...');
                         broadcast({ type: 'disconnected', reason: 'Connection timed out. Reconnecting in 5s...' });
-                        setTimeout(connectToWhatsApp, 5000);
+                        scheduleReconnect(5000);
                         return;
                     } else {
                         console.log(`⚠️ [DISCONNECTED] Reason Code: ${statusCode || 'Unknown'}. Reconnecting...`);
@@ -274,9 +383,10 @@ async function connectToWhatsApp() {
                     }
 
                     if (shouldReconnect) {
-                        setTimeout(connectToWhatsApp, 3000);
+                        scheduleReconnect(3000);
                     }
                 } else if (connection === 'open') {
+                    lastQrDataUrl = null;
                     console.log('\n✅ JARVIS WHATSAPP ENGINE IS ONLINE (MODULAR & SQLITE MODE)!\n');
                     broadcast({ type: 'connected' });
                 }
@@ -288,8 +398,9 @@ async function connectToWhatsApp() {
         sock.ev.on('creds.update', saveCreds);
 
     } catch (err) {
+        isConnecting = false;
         console.error('❌ [ENGINE START ERROR] Failed to connect to WhatsApp:', err.message);
-        setTimeout(connectToWhatsApp, 10000);
+        scheduleReconnect(10000);
     }
 }
 
@@ -307,10 +418,9 @@ app.get('/qr-events', (req, res) => {
     const client = { res };
     sseClients.push(client);
 
-    if (lastQrDataUrl) {
+    if (lastQrDataUrl && (!lastStatus || lastStatus.type === 'waiting_scan')) {
         res.write(`data: ${JSON.stringify({ type: 'waiting_scan', qr: lastQrDataUrl })}\n\n`);
-    }
-    if (lastStatus && lastStatus.type !== 'waiting_scan') {
+    } else if (lastStatus) {
         res.write(`data: ${JSON.stringify(lastStatus)}\n\n`);
     }
 

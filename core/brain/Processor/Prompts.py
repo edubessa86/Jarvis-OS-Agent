@@ -571,7 +571,9 @@ def get_native_tools():
                     name="whatsapp_action",
                     description=(
                         "[WHEN TO USE]: Mode 1 ('send'): Send a WhatsApp message or document/image. "
-                        "Mode 2 ('fetch'): Read and retrieve past WhatsApp chat history with a contact.\n"
+                        "Mode 2 ('fetch'): Read and retrieve past WhatsApp chat history with a phone number.\n"
+                        "[CRITICAL PHONE NUMBER RULE]: The 'to' parameter accepts ONLY a valid numeric phone number (10-digit mobile number or full number with country code). "
+                        "NEVER pass a contact's name in 'to'. If the user only provides a contact's name, you MUST first call 'memory_actions' ('lifetime_recall' or 'recent_logs') to retrieve their phone number, or ask the user for the number via 'complete_task' if not found in memory.\n"
                         "[CRITICAL RULE]: Never mix parameters from 'send' mode with 'fetch' mode."
                     ),
                     parameters=types.Schema(
@@ -583,7 +585,7 @@ def get_native_tools():
                             ),
                             "to": types.Schema(
                                 type=types.Type.STRING, 
-                                description="MANDATORY. Contact name OR full phone number with country code."
+                                description="MANDATORY. Numeric phone number ONLY (e.g., '919876543210' or '9876543210'). NEVER pass a contact name."
                             ),
                             "message": types.Schema(
                                 type=types.Type.STRING, 

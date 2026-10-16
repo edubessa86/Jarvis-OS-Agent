@@ -129,6 +129,7 @@ def _is_failure_prefix(text: str) -> bool:
         "Traceback (most recent call last)",
         "Error ->",
         "Failed to ",
+        "❌",
     )
     return head.startswith(failure_markers)
 
