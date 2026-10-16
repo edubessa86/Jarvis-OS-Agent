@@ -6,14 +6,9 @@ import time
 from pathlib import Path
 from datetime import datetime
 import chromadb
-from google import genai
-from google.genai import types
 from rank_bm25 import BM25Okapi
 
 from core.brain.config import (
-    GEMINI_API_KEY,
-    GEMINI_EMBEDDING_MODEL,
-    EMBEDDING_DIM,
     RAG_CHUNK_SIZE,
     RAG_CHUNK_OVERLAP,
     RAG_TOP_K,
@@ -23,6 +18,12 @@ from core.logger.logger import logger
 from core.brain.Indexer.config_store import config_store
 from core.brain.Indexer.walker import FileWalker
 from core.brain.Indexer.filters import FilterEngine
+from core.brain.Memory.LifetimeMemory import ltm_engine
+
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIM = 384
+QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+COLLECTION_NAME = "jarvis_knowledge_index_bge_small"
 
 
 class RagEngine:
@@ -36,7 +37,8 @@ class RagEngine:
         self.walker = FileWalker(self.filter_engine)
 
         self.file_hashes = self._load_json(self.file_hashes_file, {})
-        self.google_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+        self.embedding_model_name = EMBEDDING_MODEL_NAME
+        self.embedding_dim = EMBEDDING_DIM
 
         self.db_lock = threading.Lock()
         self.status_lock = threading.Lock()
@@ -46,7 +48,7 @@ class RagEngine:
 
         self.chroma_client = chromadb.PersistentClient(path=str(self.db_path))
         self.rag_collection = self.chroma_client.get_or_create_collection(
-            name="jarvis_knowledge_index"
+            name=COLLECTION_NAME
         )
 
         self._all_documents_cache = None
@@ -73,7 +75,7 @@ class RagEngine:
 
         self._ensure_default_folders()
         self._ensure_schema_compatibility()
-        logger.info("RAG Engine initialized with knowledge indexer.")
+        logger.info(f"RAG Engine initialized with local embedding model: {EMBEDDING_MODEL_NAME}")
 
         self._indexing_thread = threading.Thread(target=self._initial_index, daemon=True)
         self._indexing_thread.start()
@@ -162,8 +164,13 @@ class RagEngine:
                 self._purge_for_migration("metadata malformed")
                 return
             if "file_id" not in first_meta:
-                logger.warning("RAG schema migration: old chunks detected (missing 'file_id'). Clearing index for clean rebuild.")
+                logger.warning("RAG schema migration: missing 'file_id'. Clearing index for rebuild.")
                 self._purge_for_migration("missing file_id")
+                return
+            if first_meta.get("embedding_model") != self.embedding_model_name:
+                logger.warning(f"RAG schema migration: embedding model mismatch. Clearing index for rebuild.")
+                self._purge_for_migration("embedding model changed")
+                return
         except Exception as e:
             logger.warning(f"RAG schema check failed: {e}")
 
@@ -180,49 +187,31 @@ class RagEngine:
         except Exception as e:
             logger.error(f"RAG migration purge failed: {e}")
 
-    def _normalize_task_type(self, input_type):
-        if input_type == "search_query":
-            return "RETRIEVAL_QUERY"
-        return "RETRIEVAL_DOCUMENT"
-
     def get_embedding(self, text, input_type="search_document"):
-        if not text or not text.strip() or not self.google_client:
+        if not text or not str(text).strip():
             return None
-        max_chars = max(RAG_CHUNK_SIZE, 2000)
-        truncated = text[:max_chars] if len(text) > max_chars else text
-        task_type = self._normalize_task_type(input_type)
+        try:
+            is_query = (input_type == "search_query")
+            result = ltm_engine.embed(text, is_query=is_query)
+            if result is None:
+                return None
+            return result
+        except Exception as e:
+            logger.error(f"RAG local embedding failed: {e}")
+            return None
 
-        for attempt in range(3):
-            try:
-                response = self.google_client.models.embed_content(
-                    model=GEMINI_EMBEDDING_MODEL,
-                    contents=truncated,
-                    config=types.EmbedContentConfig(
-                        output_dimensionality=EMBEDDING_DIM,
-                        task_type=task_type
-                    )
-                )
-                return response.embeddings[0].values
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "task_type" in err_msg and attempt == 0:
-                    try:
-                        response = self.google_client.models.embed_content(
-                            model=GEMINI_EMBEDDING_MODEL,
-                            contents=truncated,
-                            config=types.EmbedContentConfig(
-                                output_dimensionality=EMBEDDING_DIM
-                            )
-                        )
-                        return response.embeddings[0].values
-                    except Exception as e2:
-                        logger.warning(f"RAG embedding (no task_type) attempt {attempt + 1} failed: {e2}")
-                else:
-                    logger.warning(f"RAG embedding attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
-                    time.sleep(1.5 * (attempt + 1))
-        logger.error("RAG embedding failed after retries.")
-        return None
+    def get_embeddings_batch(self, texts, input_type="search_document"):
+        if not texts:
+            return []
+        try:
+            is_query = (input_type == "search_query")
+            results = ltm_engine.embed(texts, is_query=is_query)
+            if results is None:
+                return [None] * len(texts)
+            return results
+        except Exception as e:
+            logger.error(f"RAG batch embedding failed: {e}")
+            return [None] * len(texts)
 
     def _recursive_chunk_text(self, text, file_extension=".txt"):
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -300,10 +289,10 @@ class RagEngine:
                 current_len = overlap_len
             current.append(p)
             current_len += p_len
-            
+
         if current:
             chunks.append("\n\n".join(current))
-            
+
         return chunks if chunks else [text[:chunk_size]]
 
     def _get_file_hash(self, file_path):
@@ -457,6 +446,8 @@ class RagEngine:
             chunks = self._recursive_chunk_text(content, ext)
             file_id = self._get_file_id(file_path)
 
+            embeddings = self.get_embeddings_batch(chunks, "search_document")
+
             batch_ids = []
             batch_embeddings = []
             batch_metadatas = []
@@ -464,8 +455,8 @@ class RagEngine:
             failed_chunks = 0
 
             for i, chunk in enumerate(chunks):
-                embedding = self.get_embedding(chunk, "search_document")
-                if embedding:
+                embedding = embeddings[i] if i < len(embeddings) else None
+                if embedding is not None and len(embedding) == self.embedding_dim:
                     batch_ids.append(f"{file_id}_{file_hash}_{i}")
                     batch_embeddings.append(embedding)
                     batch_metadatas.append({
@@ -474,7 +465,8 @@ class RagEngine:
                         "file_path": file_path,
                         "root_folder": root_folder,
                         "modified": mod_date,
-                        "file_size": file_size
+                        "file_size": file_size,
+                        "embedding_model": self.embedding_model_name
                     })
                     batch_documents.append(chunk)
                 else:

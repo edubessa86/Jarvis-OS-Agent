@@ -17,6 +17,7 @@ class LifetimeMemoryEngine:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.graph = nx.DiGraph()
         self._lock = threading.RLock()
+        self._embed_lock = threading.RLock()
 
         logger.info("⏳ Loading Semantic Embedding Model (BAAI/bge-small-en-v1.5) for LTM...")
         self.embedder = SentenceTransformer('BAAI/bge-small-en-v1.5')
@@ -50,6 +51,40 @@ class LifetimeMemoryEngine:
 
     def _get_embedding(self, text):
         return self.embedder.encode([text])[0]
+
+    def embed(self, texts, is_query=False):
+        if texts is None:
+            return None
+        single = isinstance(texts, str)
+        if single:
+            texts = [texts]
+        if not texts:
+            return [] if not single else None
+
+        prefix = "Represent this sentence for searching relevant passages: "
+        processed = []
+        for t in texts:
+            if t is None or not str(t).strip():
+                processed.append(" ")
+            elif is_query:
+                processed.append(prefix + str(t))
+            else:
+                processed.append(str(t))
+
+        try:
+            with self._embed_lock:
+                embeddings = self.embedder.encode(
+                    processed,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                    batch_size=32
+                )
+            if single:
+                return embeddings[0].tolist()
+            return [e.tolist() for e in embeddings]
+        except Exception as e:
+            logger.error(f"LTM embed failed: {e}")
+            return None
 
     def get_all_node_names(self, limit=100):
         with self._lock:

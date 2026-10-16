@@ -579,11 +579,13 @@ Jarvis implements a **four-tier** zero-duplication memory architecture:
    - **Temporal Decay:** Relations older than 6 months lose half their weight and auto-archive. The embedding engine (`BAAI/bge-small-en-v1.5`) is preloaded at startup for zero-latency multi-entity traversal.
 3. **📚 Hybrid RAG (Personal Knowledge Index):**
    - **Default Scope:** Auto-indexes the user's `Documents` folder at startup. User can add any folder via the built-in web dashboard.
+   - **Local Embeddings (Zero API Cost):** Uses the already-loaded `BAAI/bge-small-en-v1.5` model from LTM for embedding — no Gemini API calls, no quotas, no rate limits. Documents embedded with normalized 384-dim vectors; queries prefixed with the official BGE retrieval instruction for maximum accuracy.
    - **Smart Chunking:** 1500-character chunks with 200-character overlap, code-aware (line-based) chunking for `.py`, `.js`, `.ts`, `.java`, `.cpp`, and 15+ other source formats.
    - **Hybrid Retrieval:** BM25 keyword search plus vector similarity merged via **Reciprocal Rank Fusion (RRF)**.
    - **Recency Boost:** Recently modified files get a ~20% score lift.
    - **Smart Filters:** Auto-excludes system paths (`C:\Windows`, `Program Files`), dev garbage (`node_modules`, `venv`, `.git`, `build`), binaries, media, and files > 5 MB. Detects and warns on sensitive paths (`.ssh`, `.aws`, `.env`, browser profiles).
    - **Incremental Indexing:** Hash-based change detection — only modified files are re-embedded on each run.
+   - **Auto-Migration:** Detects embedding-model changes via per-chunk metadata and auto-purges the index for a clean rebuild — no manual cleanup needed on upgrades.
    - **Web Dashboard:** Local Flask UI at `127.0.0.1:8080` with live progress, folder management (add/remove/reindex), filter editor, and pause/resume controls.
 4. **⚡ Thread-Safe Ephemeral Runtime Memory (Live State & Handoff):**
    - **10-Minute TTL Artifacts:** Stores transient unspoken system artifacts (`last_screenshot`, `last_generated_image`) with automatic TTL pruning so a screenshot taken via FastBrain is immediately accessible to AgenticBrain on the next turn.
@@ -841,6 +843,7 @@ Copy `.env.example` to `.env` and populate your credentials. For 100% local LLM 
 | Ollama provider fails | Ensure `CUSTOM_BASE_URL` ends with `/v1` and follows the OpenAI schema |
 | Knowledge graph feels stale | Delete `Data/jarvis_memory/lifetime_graph.json` and reboot — nodes, weights, and embeddings rebuild |
 | Hybrid RAG results poor | Open the dashboard at `127.0.0.1:8080` → Folders tab → **Reindex** on the affected folder. For a full rebuild: delete `Data/jarvis_memory/rag_chroma_db` and reboot. |
+| RAG index stuck or files not appearing after embedding-model change | The engine auto-detects embedding-model changes via chunk metadata and purges stale vectors. If you upgraded the model manually, delete `Data/jarvis_memory/rag_chroma_db/` and `Data/jarvis_memory/rag_hashes.json`, then reboot — Jarvis will re-index everything with the new model. |
 | Dashboard not opening | Ensure `flask` is installed (`pip install flask`). Check logs for `Indexer Dashboard running at http://127.0.0.1:8080`. If port is busy, Jarvis auto-shifts to 8081–8095 — check startup logs for the actual port. |
 | RAG indexing sensitive folders | Open the dashboard → Folders tab → **Remove**. Then edit `Data/jarvis_indexer/folders.json` to confirm removal. Sensitive paths like `.ssh`, `.aws`, `.env` are auto-warned but not hard-blocked. |
 | RAG indexer stuck / too slow | If indexing `Documents` hangs, check for permission-denied folders (e.g., `My Music`, `My Pictures` — legacy Windows junctions). These are auto-skipped with `legacy_junctions=N` in scan summary. Reduce scope via dashboard filters. |
@@ -873,6 +876,9 @@ Jarvis was developed on an Intel i5-3210M with 4 GB RAM. If your machine can run
 
 **Does wake word require an Azure subscription?**  
 No. Azure Custom Keyword detection runs fully on-device — the `.table` file is a one-time build from Speech Studio, and after that no API key or network call is needed for wake word detection. If you never build the model, Jarvis falls back to Vosk automatically.
+
+**Does RAG / knowledge indexing need API keys?**  
+No. Both the LTM semantic graph and the RAG knowledge index use the same local `BAAI/bge-small-en-v1.5` model (33M params, ~130 MB). Embeddings are generated on CPU with zero cloud calls, zero quotas, and zero cost. The only API keys you need are for the LLM brains, voice, and communication channels.
 
 ---
 
