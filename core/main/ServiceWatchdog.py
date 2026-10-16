@@ -25,6 +25,7 @@ class ServiceWatchdog:
         self.max_retries = max_retries
         self.cooldown = cooldown
         self._is_running = False
+        self._stop_event = threading.Event()
         self._thread = None
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self._creds_path = os.path.join(base_dir, "Data", "SessionCookies", "auth_info_baileys", "creds.json")
@@ -79,22 +80,25 @@ class ServiceWatchdog:
         if self._is_running:
             return
         self._is_running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._thread.start()
         logging.info("Service Watchdog started.")
 
     def stop(self):
         self._is_running = False
+        self._stop_event.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=1.5)
         logging.info("Service Watchdog stopped.")
 
     def _monitor_loop(self):
-        time.sleep(10)
-        while self._is_running:
+        if self._stop_event.wait(timeout=10):
+            return
+        while self._is_running and not self._stop_event.is_set():
             current_time = time.time()
             for service_name, service_data in self.services.items():
-                if not self._is_running:
+                if not self._is_running or self._stop_event.is_set():
                     break
                 if current_time < service_data["next_retry_time"]:
                     continue
@@ -125,7 +129,8 @@ class ServiceWatchdog:
                             service_data["retries"] = 0
                 except Exception as e:
                     logging.error(f"Watchdog error monitoring {service_name}: {e}")
-            time.sleep(self.check_interval)
+            if self._stop_event.wait(timeout=self.check_interval):
+                break
 
 watchdog_instance = ServiceWatchdog()
 

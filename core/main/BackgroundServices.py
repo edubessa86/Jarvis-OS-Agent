@@ -3,6 +3,7 @@ import sys
 import subprocess
 import platform
 import logging
+import threading
 from dotenv import load_dotenv
 from core.utils.ProcessManager import proc_manager
 from core.voice.stt_status import exit_stt_popup
@@ -122,8 +123,8 @@ def start_baileys_server():
             _baileys_process = proc_manager.spawn(
                 ["node", script_path],
                 cwd=baileys_dir,
-                stdout=None,
-                stderr=None,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=creation_flags
             )
             logging.info("Baileys server started successfully.")
@@ -310,10 +311,18 @@ def is_telegram_remote_service_running() -> bool:
 
 def stop_all_services():
     logging.info("Initiating shutdown of all background services.")
-    stop_agent_panel()
-    stop_stt_popup()
-    stop_baileys_server()
-    stop_mobile_bridge()
-    stop_telegram_remote_service()
-    stop_indexer_dashboard()
-    stop_rag_engine()
+    stop_tasks = [
+        stop_agent_panel,
+        stop_stt_popup,
+        stop_baileys_server,
+        stop_mobile_bridge,
+        stop_telegram_remote_service,
+        stop_rag_engine
+    ]
+    threads = []
+    for task in stop_tasks:
+        t = threading.Thread(target=task, daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(timeout=2.5)

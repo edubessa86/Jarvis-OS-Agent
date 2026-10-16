@@ -27,6 +27,18 @@ logging.basicConfig(
 
 logger = logging.getLogger("rich")
 
+for _noisy_logger in (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "comtypes",
+    "sentence_transformers",
+    "chromadb",
+    "werkzeug",
+    "googleapiclient.discovery_cache"
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
 try:
     log_path = Path(CONFIG["LOG_FILE"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,7 +50,6 @@ except Exception as exc:
 
 
 def log_unhandled_exception(exc_type, exc_value, exc_traceback):
-    """Send uncaught exceptions to the shared Jarvis logger."""
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return

@@ -5,6 +5,7 @@ from core.brain.Processor.Processor import process_command
 from core.brain.executor import execute_actions
 from core.brain.Memory.Memory import ContextMemory
 from core.voice import interrupt
+from core.utils.shutdown import is_shutdown as is_shutting_down
 
 _is_busy = False
 
@@ -14,11 +15,13 @@ def is_jarvis_busy() -> bool:
 
 def main_command_processor(command: str, executor: ThreadPoolExecutor, memory: ContextMemory, source: str = "voice") -> None:
     global _is_busy
+    if is_shutting_down():
+        return
     _is_busy = True  
     
     try:
         raw = command.strip() if command else ""
-        if not raw:
+        if not raw or is_shutting_down():
             return
         
         if interrupt.is_interrupted():
@@ -31,6 +34,8 @@ def main_command_processor(command: str, executor: ThreadPoolExecutor, memory: C
             memory.ephemeral["force_silent_agentic"] = True
         
         result = process_command(raw, memory_instance=memory)
+        if is_shutting_down():
+            return
         execute_actions(result, executor)
         
         if source == "telegram_bot" and hasattr(memory, 'ephemeral'):

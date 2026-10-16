@@ -70,7 +70,7 @@ def register_custom_protocol(current_dir):
         logger.warning(f"'JarvisProtocol.py' not found at {handler_script}.")
 
     python_exe = sys.executable
-    command = f'"{python_exe}" "{handler_script}" "%1"'
+    command = f'conhost.exe "{python_exe}" "{handler_script}" "%1"'
 
     try:
         key_path = fr"Software\Classes\{protocol_name}"
