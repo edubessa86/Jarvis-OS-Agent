@@ -130,6 +130,12 @@ AGENT_SYSTEM_PROMPT = """<agent_system_prompt>
   </research_and_data_extraction_rules>
 
   <error_recovery_and_debugging>
+    <rule name="user_cancelled_action">
+      <directive>If any tool observation contains '[USER_CANCELLED]', the user explicitly clicked 'Cancel' on the UI confirmation preview. NEVER retry a cancelled email, WhatsApp, or Telegram message. Immediately invoke 'complete_task' and inform the user that the message was cancelled as requested.</directive>
+    </rule>
+    <rule name="user_edited_action">
+      <directive>If any tool observation contains '[NOTE: User explicitly edited...]', it means the user manually modified the subject or message body inside the UI preview panel before clicking Send. Treat the user's edited text as the absolute final ground truth that supersedes the original wording in <Mission>. NEVER resend the original unedited message, and if you mention the sent content in 'complete_task', always reflect the user's edited version.</directive>
+    </rule>
     <rule name="two_strike_rule">
       <strike number="1">If a tool or script fails, read stderr/stdout, fix syntax/logic, and retry once with an improved script.</strike>
       <strike number="2">If it fails a second time, ABANDON that approach immediately and pivot to an alternative strategy.</strike>

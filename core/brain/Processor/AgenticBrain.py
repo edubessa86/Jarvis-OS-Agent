@@ -154,6 +154,9 @@ def update_confirmed_facts(
         )
     elif action_key == "run_python_code":
         facts_ledger["Last Python Output"] = obs_str[:150].replace("\n", " ").strip()
+    elif action_key in ("email_action", "whatsapp_action", "telegram_action"):
+        clean_summary = obs_str.replace("Observation:", "").replace("\n", " ").strip()
+        facts_ledger[f"Communication ({action_key} {action_detail[:25]})"] = clean_summary[:300]
 
 
 def run_agentic_loop(
@@ -574,6 +577,8 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                 current_detail = f"To: {value.get('to', '')}"
                         elif key == "whatsapp_action" and isinstance(value, dict):
                             current_detail = f"To: {value.get('to', '')}"
+                        elif key == "telegram_action" and isinstance(value, dict):
+                            current_detail = f"To: {value.get('to', '')}"
                         elif key == "image_command" and isinstance(value, dict):
                             current_detail = value.get("prompt", "")
                         elif key == "calendar_action" and isinstance(value, dict):
@@ -692,8 +697,9 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                             observation = "Observation: No valid memory target provided. Use 'recent_logs' or 'lifetime_recall'."
 
                     elif executed_tools:
-                        from core.brain.executor import execute_tools_parallel
+                        from core.brain.executor import execute_tools_parallel, consume_confirmation_wait_time
                         observation = execute_tools_parallel(ai_response)
+                        start_time += consume_confirmation_wait_time()
 
                     if observation:
                         if isinstance(observation, dict) and observation.get("type") == "image_payload":
@@ -708,14 +714,22 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
 
                         if not is_failure:
                             obs_text = str(observation)
+                            is_user_cancelled = "[USER_CANCELLED]" in obs_text
+                            is_user_edited = "[NOTE: User explicitly edited" in obs_text
                             for t_key in executed_tools:
                                 t_val = ai_response.get(t_key, {})
                                 if not isinstance(t_val, dict):
                                     t_val = {}
                                 action_fingerprint = f"{t_key}:{str(t_val)[:100]}"
-                                completed_actions.add(f"{action_fingerprint} -> [SUCCESS]")
-                                
-                                update_confirmed_facts(confirmed_facts, t_key, action_detail, observation)
+                                if is_user_cancelled:
+                                    completed_actions.add(f"{action_fingerprint} -> [CANCELLED BY USER - DO NOT RETRY]")
+                                    confirmed_facts[f"User Cancelled ({t_key})"] = "User explicitly cancelled sending this message from the UI preview. Do NOT retry."
+                                elif is_user_edited:
+                                    completed_actions.add(f"{action_fingerprint} -> [SUCCESS - USER EDITED CONTENT IN UI AND SENT, DO NOT RESEND]")
+                                    update_confirmed_facts(confirmed_facts, t_key, action_detail, observation)
+                                else:
+                                    completed_actions.add(f"{action_fingerprint} -> [SUCCESS]")
+                                    update_confirmed_facts(confirmed_facts, t_key, action_detail, observation)
 
                                 try:
                                     if t_key == "system_controller":
@@ -769,9 +783,16 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                     elif t_key in ["email_action", "whatsapp_action", "telegram_action"]:
                                         act_mode = t_val.get("action", "send")
                                         target_to = t_val.get("to", "")
-                                        evt_desc = f"{t_key} ({act_mode})" + (f" -> {target_to}" if target_to else "")
+                                        if is_user_cancelled:
+                                            evt_desc = f"{t_key} ({act_mode} cancelled by user)" + (f" -> {target_to}" if target_to else "")
+                                        elif is_user_edited:
+                                            edit_match = re.search(r"\[NOTE: User explicitly edited.*?\]", obs_text, flags=re.DOTALL)
+                                            edit_info = f" {edit_match.group(0)}" if edit_match else " [User Edited in UI]"
+                                            evt_desc = f"{t_key} ({act_mode})" + (f" -> {target_to}" if target_to else "") + edit_info
+                                        else:
+                                            evt_desc = f"{t_key} ({act_mode})" + (f" -> {target_to}" if target_to else "")
                                         metadata_tracker["system_events"].append(evt_desc)
-                                        if t_val.get("file_path") and str(t_val["file_path"]) not in metadata_tracker["files_touched"]:
+                                        if not is_user_cancelled and t_val.get("file_path") and str(t_val["file_path"]) not in metadata_tracker["files_touched"]:
                                             metadata_tracker["files_touched"].append(str(t_val["file_path"]))
                                     elif t_key == "execute_terminal_command":
                                         metadata_tracker["system_events"].append(f"Terminal Command: {t_val.get('command', '')}")
@@ -783,16 +804,22 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                     logger.error(f"⚠️ Error tracking metadata: {meta_err}")
 
                             if not silent:
+                                clean_ui_obs = re.sub(
+                                    r"\s*\[NOTE: User explicitly edited.*?\]",
+                                    " (Edited by User)",
+                                    str(observation),
+                                    flags=re.DOTALL,
+                                ).strip()[:200]
                                 update_agent_status(
                                     step=step + 1,
                                     total_steps=max_steps,
                                     thought=ai_response.get("thought", ""),
                                     action=action_key,
                                     action_detail=action_detail,
-                                    observation=str(observation)[:200],
+                                    observation=clean_ui_obs,
                                     tokens=total_loop_tokens,
                                 )
-                                send_telegram_update(observation=str(observation))
+                                send_telegram_update(observation=clean_ui_obs)
                             break
                         else:
                             obs_str = str(observation).strip()

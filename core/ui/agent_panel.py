@@ -3,6 +3,7 @@ import json
 import os
 import re
 import math
+import queue
 import zmq
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false;default.warning=false"
@@ -13,7 +14,7 @@ from PyQt5.QtCore import (Qt, QTimer, QPropertyAnimation, QEasingCurve,
                           QThread, pyqtSignal)
 from PyQt5.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QApplication, 
                              QGraphicsOpacityEffect, QFrame, QSizePolicy,
-                             QScrollArea)
+                             QScrollArea, QPushButton, QTextEdit, QLineEdit)
 from PyQt5.QtGui import QFont, QColor, QFontDatabase, QFontMetrics
 
 def qt_message_handler(mode, context, message):
@@ -22,19 +23,76 @@ def qt_message_handler(mode, context, message):
 
 class AgentZmqListener(QThread):
     status_received = pyqtSignal(dict)
+    confirmation_requested = pyqtSignal(dict)
     
+    def __init__(self):
+        super().__init__()
+        self.reply_queue = queue.Queue()
+
+    def send_decision(self, payload: dict):
+        self.reply_queue.put_nowait(payload)
+
     def run(self):
         context = zmq.Context()
-        socket = context.socket(zmq.SUB)
-        socket.connect("tcp://127.0.0.1:5555")
-        socket.setsockopt_string(zmq.SUBSCRIBE, "AGENT_UPDATE")
+        
+        sub_socket = context.socket(zmq.SUB)
+        sub_socket.connect("tcp://127.0.0.1:5555")
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, "AGENT_UPDATE")
+        
+        confirm_pull = context.socket(zmq.PULL)
+        confirm_pull.setsockopt(zmq.LINGER, 0)
+        try:
+            confirm_pull.bind("tcp://127.0.0.1:5556")
+        except Exception:
+            confirm_pull.connect("tcp://127.0.0.1:5556")
+
+        confirm_push = context.socket(zmq.PUSH)
+        confirm_push.setsockopt(zmq.LINGER, 1000)
+        confirm_push.setsockopt(zmq.SNDTIMEO, 500)
+        try:
+            confirm_push.bind("tcp://127.0.0.1:5557")
+        except Exception:
+            confirm_push.connect("tcp://127.0.0.1:5557")
+
+        poller = zmq.Poller()
+        poller.register(sub_socket, zmq.POLLIN)
+        poller.register(confirm_pull, zmq.POLLIN)
         
         while True:
             try:
-                message = socket.recv_string()
-                topic, json_data = message.split(" ", 1)
-                data = json.loads(json_data)
-                self.status_received.emit(data)
+                while not self.reply_queue.empty():
+                    reply_data = self.reply_queue.get_nowait()
+                    try:
+                        confirm_push.send_json(reply_data, flags=zmq.NOBLOCK)
+                    except zmq.Again:
+                        try:
+                            confirm_push.send_json(reply_data)
+                        except Exception:
+                            pass
+
+                socks = dict(poller.poll(25))
+
+                if sub_socket in socks and socks[sub_socket] == zmq.POLLIN:
+                    while True:
+                        try:
+                            message = sub_socket.recv_string(flags=zmq.NOBLOCK)
+                            topic, json_data = message.split(" ", 1)
+                            data = json.loads(json_data)
+                            self.status_received.emit(data)
+                        except zmq.Again:
+                            break
+                        except Exception:
+                            break
+
+                if confirm_pull in socks and socks[confirm_pull] == zmq.POLLIN:
+                    while True:
+                        try:
+                            confirm_data = confirm_pull.recv_json(flags=zmq.NOBLOCK)
+                            self.confirmation_requested.emit(confirm_data)
+                        except zmq.Again:
+                            break
+                        except Exception:
+                            break
             except Exception:
                 pass
 
@@ -61,6 +119,9 @@ class AgentPanel(QWidget):
 
         self.gradient_phase = 0.0
         self.current_action_type = "idle"
+        self.awaiting_confirmation = False
+        self.active_confirm_id = None
+        self.active_confirm_platform = ""
 
         self.current_rgb = [191, 90, 242]
         self.target_rgb = [191, 90, 242]
@@ -81,6 +142,7 @@ class AgentPanel(QWidget):
         
         self.zmq_listener = AgentZmqListener()
         self.zmq_listener.status_received.connect(self.process_status_update)
+        self.zmq_listener.confirmation_requested.connect(self.show_confirmation_preview)
         self.zmq_listener.start()
 
     def minimumSizeHint(self):
@@ -250,6 +312,168 @@ class AgentPanel(QWidget):
         self.layout.addWidget(self.obs_label)
         self.obs_label.hide() 
 
+        self.preview_card = QFrame()
+        self.preview_card.setObjectName("PreviewCard")
+        self.preview_card.setMinimumSize(0, 0)
+        self.preview_card.setAttribute(Qt.WA_StyledBackground, True)
+        self.preview_card.setStyleSheet("""
+            #PreviewCard {
+                background-color: rgba(255, 255, 255, 0.04);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 16px;
+            }
+        """)
+
+        self.preview_layout = QVBoxLayout(self.preview_card)
+        self.preview_layout.setContentsMargins(14, 12, 14, 12)
+        self.preview_layout.setSpacing(8)
+        self.preview_layout.setSizeConstraint(QVBoxLayout.SetNoConstraint)
+
+        meta_layout = QHBoxLayout()
+        meta_layout.setContentsMargins(0, 0, 0, 0)
+        meta_layout.setSpacing(8)
+
+        self.preview_badge = QLabel("MESSAGE")
+        self.preview_badge.setFont(QFont(self.font_eng, 8, QFont.Bold))
+        self.preview_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.preview_badge.setStyleSheet("""
+            QLabel {
+                color: #FFFFFF;
+                background-color: rgba(50, 215, 75, 0.28);
+                border: 1px solid rgba(50, 215, 75, 0.55);
+                border-radius: 6px;
+                padding: 2px 8px;
+                letter-spacing: 0.8px;
+            }
+        """)
+
+        self.preview_to_label = QLabel("")
+        self.preview_to_label.setFont(QFont(self.font_eng, 10, QFont.Bold))
+        self.preview_to_label.setStyleSheet("color: rgba(255, 255, 255, 0.92); background: transparent; border: none;")
+        self.preview_to_label.setMinimumSize(0, 0)
+
+        meta_layout.addWidget(self.preview_badge)
+        meta_layout.addWidget(self.preview_to_label, 1)
+        self.preview_layout.addLayout(meta_layout)
+
+        self.preview_subject_input = QLineEdit()
+        self.preview_subject_input.setMinimumSize(0, 0)
+        self.preview_subject_input.setFixedHeight(30)
+        self.preview_subject_input.setCursor(Qt.IBeamCursor)
+        self.preview_subject_input.setPlaceholderText("Subject...")
+        self.preview_subject_input.setFont(QFont(self.font_eng, 10, QFont.Medium))
+        self.preview_subject_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(0, 0, 0, 0.38);
+                color: rgba(255, 255, 255, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.09);
+                border-radius: 8px;
+                padding: 4px 10px;
+            }
+            QLineEdit:focus {
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                background-color: rgba(0, 0, 0, 0.52);
+            }
+        """)
+        self.preview_layout.addWidget(self.preview_subject_input)
+        self.preview_subject_input.hide()
+
+        self.preview_body_edit = QTextEdit()
+        self.preview_body_edit.setMinimumSize(0, 0)
+        self.preview_body_edit.setFixedHeight(82)
+        self.preview_body_edit.setCursor(Qt.IBeamCursor)
+        self.preview_body_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.preview_body_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.preview_body_edit.setFont(QFont(self.font_eng, 10, QFont.Normal))
+        self.preview_body_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: rgba(0, 0, 0, 0.38);
+                color: rgba(245, 245, 250, 0.95);
+                border: 1px solid rgba(255, 255, 255, 0.09);
+                border-radius: 10px;
+                padding: 6px 10px;
+                selection-background-color: rgba(191, 90, 242, 0.45);
+            }
+            QTextEdit:focus {
+                border: 1px solid rgba(255, 255, 255, 0.28);
+                background-color: rgba(0, 0, 0, 0.52);
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 4px;
+                margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.22);
+                border-radius: 2px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+        self.preview_layout.addWidget(self.preview_body_edit)
+
+        self.preview_attachment_label = QLabel("")
+        self.preview_attachment_label.setMinimumSize(0, 0)
+        self.preview_attachment_label.setFixedHeight(22)
+        self.preview_attachment_label.setFont(QFont(self.font_eng, 8, QFont.Bold))
+        self.preview_attachment_label.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 0.72);
+                background-color: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 6px;
+                padding: 2px 8px;
+            }
+        """)
+        self.preview_layout.addWidget(self.preview_attachment_label)
+        self.preview_attachment_label.hide()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(0, 2, 0, 0)
+        btn_layout.setSpacing(10)
+
+        self.preview_hint_label = QLabel("Click text to edit  •  Esc to cancel")
+        self.preview_hint_label.setFont(QFont(self.font_eng, 8, QFont.Medium))
+        self.preview_hint_label.setStyleSheet("color: rgba(255, 255, 255, 0.35); background: transparent; border: none;")
+        btn_layout.addWidget(self.preview_hint_label)
+        btn_layout.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setFixedSize(94, 32)
+        self.cancel_btn.setFont(QFont(self.font_eng, 9, QFont.Bold))
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 69, 58, 0.14);
+                color: #FF6961;
+                border: 1px solid rgba(255, 69, 58, 0.32);
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 69, 58, 0.28);
+                border: 1px solid rgba(255, 69, 58, 0.6);
+                color: #FFFFFF;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 69, 58, 0.4);
+            }
+        """)
+        self.cancel_btn.clicked.connect(lambda: self.handle_confirm_decision(False))
+
+        self.send_btn = QPushButton("Send Now")
+        self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setFixedSize(118, 32)
+        self.send_btn.setFont(QFont(self.font_eng, 9, QFont.Bold))
+        self.send_btn.clicked.connect(lambda: self.handle_confirm_decision(True))
+
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.send_btn)
+        self.preview_layout.addLayout(btn_layout)
+
+        self.layout.addWidget(self.preview_card)
+        self.preview_card.hide()
+
         self.outer_layout.addWidget(self.container)
 
         self.hide_timer = QTimer(self)
@@ -318,6 +542,9 @@ class AgentPanel(QWidget):
             "thinking": [191, 90, 242],
             "workspace": [255, 159, 10],
             "communication": [50, 215, 75],
+            "confirm_whatsapp": [37, 211, 102],
+            "confirm_telegram": [0, 152, 234],
+            "confirm_email": [255, 149, 0],
             "vision": [0, 255, 200],
             "file_ops": [255, 200, 0],
             "terminal": [0, 255, 100],
@@ -367,10 +594,29 @@ class AgentPanel(QWidget):
         vbar = self.thought_scroll.verticalScrollBar()
         vbar.setValue(vbar.maximum())
 
+    def keyPressEvent(self, event):
+        if self.awaiting_confirmation:
+            if event.key() == Qt.Key_Escape:
+                self.handle_confirm_decision(False)
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+                self.handle_confirm_decision(True)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def calculate_target_geometry(self):
         fixed_width = 580 
         
-        if self.obs_label.isVisible() and self.obs_label.text().strip():
+        if self.awaiting_confirmation and self.preview_card.isVisible():
+            extra_height = 194
+            if self.preview_subject_input.isVisible():
+                extra_height += 38
+            if self.preview_attachment_label.isVisible():
+                extra_height += 30
+            fixed_height = 190 + extra_height
+        elif self.obs_label.isVisible() and self.obs_label.text().strip():
             fixed_height = 190 + self.obs_label.sizeHint().height() + 20
         else:
             fixed_height = 190
@@ -382,6 +628,144 @@ class AgentPanel(QWidget):
         x = (screen.width() - fixed_width) // 2
         y = screen.top() + 20
         return QRect(x, y, fixed_width, fixed_height)
+
+    def show_confirmation_preview(self, data: dict):
+        self.hide_timer.stop()
+        self.awaiting_confirmation = True
+        self.active_confirm_id = data.get("request_id", "")
+        platform = str(data.get("platform", "message")).lower()
+        self.active_confirm_platform = platform
+        recipient = str(data.get("to", ""))
+        subject = str(data.get("subject", ""))
+        body = str(data.get("body", ""))
+        attachments = data.get("attachments") or []
+
+        if not self.rgb_timer.isActive():
+            self.rgb_timer.start(40)
+
+        theme_styles = {
+            "whatsapp": (
+                "WHATSAPP",
+                "confirm_whatsapp",
+                "rgba(37, 211, 102, 0.22)",
+                "rgba(37, 211, 102, 0.65)",
+                "#25D366",
+                "#1DA851"
+            ),
+            "telegram": (
+                "TELEGRAM",
+                "confirm_telegram",
+                "rgba(0, 152, 234, 0.22)",
+                "rgba(0, 152, 234, 0.65)",
+                "#0098EA",
+                "#007ACC"
+            ),
+            "email": (
+                "EMAIL",
+                "confirm_email",
+                "rgba(255, 149, 0, 0.22)",
+                "rgba(255, 149, 0, 0.65)",
+                "#FF9500",
+                "#CC7700"
+            )
+        }
+
+        badge_text, action_type, badge_bg, badge_border, btn_bg, btn_hover = theme_styles.get(
+            platform,
+            ("MESSAGE", "communication", "rgba(50, 215, 75, 0.22)", "rgba(50, 215, 75, 0.65)", "#32D74B", "#28B43E")
+        )
+
+        self.current_action_type = action_type
+        self.status_tag.setText(f"APPROVE {badge_text}")
+
+        self.preview_badge.setText(badge_text)
+        self.preview_badge.setStyleSheet(f"""
+            QLabel {{
+                color: #FFFFFF;
+                background-color: {badge_bg};
+                border: 1px solid {badge_border};
+                border-radius: 6px;
+                padding: 2px 8px;
+                letter-spacing: 0.8px;
+            }}
+        """)
+
+        self.send_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_bg};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {btn_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(255, 255, 255, 0.25);
+            }}
+        """)
+
+        fm = QFontMetrics(self.preview_to_label.font())
+        elided_to = fm.elidedText(f"To: {recipient}", Qt.ElideRight, 390)
+        self.preview_to_label.setText(elided_to)
+
+        if platform == "email":
+            self.set_label_font(self.preview_subject_input, subject, 10)
+            self.preview_subject_input.setText(subject)
+            self.preview_subject_input.show()
+        else:
+            self.preview_subject_input.clear()
+            self.preview_subject_input.hide()
+
+        self.set_label_font(self.preview_body_edit, body, 10)
+        self.preview_body_edit.setPlainText(body)
+
+        if attachments:
+            att_text = f"ATTACHED: {', '.join(attachments)}"
+            fm_att = QFontMetrics(self.preview_attachment_label.font())
+            self.preview_attachment_label.setText(fm_att.elidedText(att_text, Qt.ElideRight, 480))
+            self.preview_attachment_label.show()
+        else:
+            self.preview_attachment_label.clear()
+            self.preview_attachment_label.hide()
+
+        self.obs_label.hide()
+        self.separator.show()
+        self.preview_card.show()
+        self.show_panel()
+        self.activateWindow()
+        self.preview_body_edit.setFocus()
+
+    def handle_confirm_decision(self, approved: bool):
+        if not self.awaiting_confirmation:
+            return
+
+        req_id = self.active_confirm_id
+        edited_subject = self.preview_subject_input.text().strip()
+        edited_body = self.preview_body_edit.toPlainText().strip()
+
+        self.awaiting_confirmation = False
+        self.active_confirm_id = None
+        self.preview_card.hide()
+        self.preview_subject_input.hide()
+        self.preview_attachment_label.hide()
+        self.separator.hide()
+
+        if approved:
+            self.current_action_type = "communication"
+            self.status_tag.setText(f"SENDING {self.active_confirm_platform.upper()}...")
+        else:
+            self.current_action_type = "idle"
+            self.status_tag.setText("MESSAGE CANCELLED")
+
+        self.zmq_listener.send_decision({
+            "request_id": req_id,
+            "approved": approved,
+            "subject": edited_subject,
+            "body": edited_body
+        })
+
+        self.show_panel()
 
     def show_panel(self):
         self.hide_timer.stop()
@@ -476,6 +860,14 @@ class AgentPanel(QWidget):
             self.reset_island_style()
             return
 
+        if self.awaiting_confirmation:
+            tokens = status.get("tokens", 0)
+            self.token_label.setText(f"TOKENS: {self.format_tokens(tokens)}")
+            if step > 0 and self.current_step != step:
+                self.phase_label.setText(f"STEP: {step:02}")
+                self.current_step = step
+            return
+
         if status == self.last_status:
             if self.isVisible() and step == 0:
                 self.hide_timer.start(4000)
@@ -505,6 +897,7 @@ class AgentPanel(QWidget):
             "deep_research": ("DEEP RESEARCH", "deep_task"),
             "email_action": ("SENDING EMAIL", "communication"),
             "whatsapp_action": ("WHATSAPP", "communication"),
+            "telegram_action": ("TELEGRAM", "communication"),
             "image_command": ("GENERATING IMAGE", "image_gen"),
             "clipboard_action": ("CLIPBOARD", "clipboard"),
             "vision": ("ANALYZING MEDIA", "vision"),

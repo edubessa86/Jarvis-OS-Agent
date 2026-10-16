@@ -29,8 +29,104 @@ import tempfile
 import time
 import shutil
 import socket
+import uuid
+import threading
+import zmq
 
 file_editor = JarvisFileEditor()
+
+_CONFIRM_LOCK = threading.Lock()
+_CONFIRM_WAIT_LOCK = threading.Lock()
+_TOTAL_CONFIRM_WAIT_SECONDS = 0.0
+
+
+def consume_confirmation_wait_time() -> float:
+    global _TOTAL_CONFIRM_WAIT_SECONDS
+    with _CONFIRM_WAIT_LOCK:
+        waited = _TOTAL_CONFIRM_WAIT_SECONDS
+        _TOTAL_CONFIRM_WAIT_SECONDS = 0.0
+        return waited
+
+
+def request_action_confirmation(
+    platform_name: str,
+    to_recipient: str,
+    body_text: str,
+    subject_text: str = "",
+    attachments: List[str] = None,
+    timeout: float = 300.0,
+) -> Dict[str, Any]:
+    global _TOTAL_CONFIRM_WAIT_SECONDS
+    with _CONFIRM_LOCK:
+        wait_start = time.time()
+        ctx = zmq.Context.instance()
+        push_sock = ctx.socket(zmq.PUSH)
+        pull_sock = ctx.socket(zmq.PULL)
+        push_sock.setsockopt(zmq.LINGER, 1000)
+        push_sock.setsockopt(zmq.SNDTIMEO, 2000)
+        pull_sock.setsockopt(zmq.LINGER, 0)
+
+        try:
+            push_sock.connect("tcp://127.0.0.1:5556")
+            pull_sock.connect("tcp://127.0.0.1:5557")
+            time.sleep(0.08)
+
+            while True:
+                try:
+                    pull_sock.recv_json(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                except Exception:
+                    break
+
+            req_id = str(uuid.uuid4())
+            clean_attachments = [
+                os.path.basename(str(p)) for p in (attachments or []) if p
+            ]
+            payload = {
+                "request_id": req_id,
+                "platform": platform_name,
+                "to": to_recipient,
+                "subject": subject_text or "",
+                "body": body_text or "",
+                "attachments": clean_attachments,
+            }
+
+            push_sock.send_json(payload)
+
+            poller = zmq.Poller()
+            poller.register(pull_sock, zmq.POLLIN)
+
+            while (time.time() - wait_start) < timeout:
+                if is_shutdown():
+                    return {"approved": False, "subject": subject_text, "body": body_text}
+
+                socks = dict(poller.poll(200))
+                if pull_sock in socks and socks[pull_sock] == zmq.POLLIN:
+                    reply = pull_sock.recv_json()
+                    if isinstance(reply, dict) and reply.get("request_id") == req_id:
+                        waited = time.time() - wait_start
+                        with _CONFIRM_WAIT_LOCK:
+                            _TOTAL_CONFIRM_WAIT_SECONDS += waited
+                        return {
+                            "approved": bool(reply.get("approved", False)),
+                            "subject": reply.get("subject", subject_text),
+                            "body": reply.get("body", body_text),
+                        }
+
+            waited = time.time() - wait_start
+            with _CONFIRM_WAIT_LOCK:
+                _TOTAL_CONFIRM_WAIT_SECONDS += waited
+            return {"approved": False, "subject": subject_text, "body": body_text}
+        except Exception as e:
+            logger.error(f"Confirmation UI bridge error: {e}")
+            return {"approved": False, "subject": subject_text, "body": body_text}
+        finally:
+            try:
+                push_sock.close()
+                pull_sock.close()
+            except Exception:
+                pass
 
 def execute_actions(result: Dict[str, any], executor: ThreadPoolExecutor) -> str:
     if is_shutdown():
@@ -436,12 +532,43 @@ def handle_email_action(email_action: dict) -> str:
             logger.warning(f"⚠️ Email attachment not found: {file_path_raw}")
             return f"Failed to send email. Attachment '{file_path_raw}' not found at the given absolute path."
 
+    orig_subject_norm = str(subject or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    orig_body_norm = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    confirm_res = request_action_confirmation(
+        platform_name="email",
+        to_recipient=to_address,
+        body_text=body,
+        subject_text=subject,
+        attachments=[attachment_abs_path] if attachment_abs_path else [],
+    )
+    if not confirm_res.get("approved"):
+        logger.info(f"🛑 Email to {to_address} cancelled by user via Agent Panel.")
+        return f"[USER_CANCELLED] User cancelled sending the email to {to_address} from the preview panel. Do NOT retry."
+
+    subject = confirm_res.get("subject", subject)
+    body = confirm_res.get("body", body)
+
+    new_subject_norm = str(subject or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    new_body_norm = str(body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    subject_edited = new_subject_norm != orig_subject_norm
+    body_edited = new_body_norm != orig_body_norm
+
+    edit_note = ""
+    if subject_edited and body_edited:
+        edit_note = f" [NOTE: User explicitly edited the subject from UI to: '{subject}' and the body from UI to: '{body}']"
+    elif body_edited:
+        edit_note = f" [NOTE: User explicitly edited the body from UI to: '{body}']"
+    elif subject_edited:
+        edit_note = f" [NOTE: User explicitly edited the subject from UI to: '{subject}']"
+
     logger.info(f"🤖 Agent Sending Email to: {to_address}")
     if send_email(to_address, subject, body, attachment_abs_path):
         logger.info(f"✅ Email successfully sent to {to_address}")
-        return f"Email successfully sent to {to_address}."
+        return f"Email successfully sent to {to_address}.{edit_note}"
     logger.error(f"❌ send_email returned False for {to_address}. Check SMTP configurations.")
-    return f"Failed to send email to {to_address}. Please verify SMTP credentials and internet connection."
+    return f"Failed to send email to {to_address}. Please verify SMTP credentials and internet connection.{edit_note}"
 
 @with_observation
 def handle_whatsapp_action(whatsapp_action: dict) -> str:
@@ -466,6 +593,25 @@ def handle_whatsapp_action(whatsapp_action: dict) -> str:
             logger.warning(f"⚠️ WhatsApp attachment not found: {file_path_raw}")
             return f"Failed to send WhatsApp. Attachment '{file_path_raw}' not found at the given absolute path."
 
+    orig_body_norm = str(msg_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    confirm_res = request_action_confirmation(
+        platform_name="whatsapp",
+        to_recipient=to_name,
+        body_text=msg_body,
+        attachments=[attachment_abs_path] if attachment_abs_path else [],
+    )
+    if not confirm_res.get("approved"):
+        logger.info(f"🛑 WhatsApp message to {to_name} cancelled by user via Agent Panel.")
+        return f"[USER_CANCELLED] User cancelled sending the WhatsApp message to {to_name} from the preview panel. Do NOT retry."
+
+    msg_body = confirm_res.get("body", msg_body)
+    new_body_norm = str(msg_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    edit_note = ""
+    if new_body_norm != orig_body_norm:
+        edit_note = f" [NOTE: User explicitly edited the body from UI to: '{msg_body}']"
+
     logger.info(f"🤖 Agent Sending WhatsApp to: {to_name}")
     wa_result = send_whatsapp_message(to_name, msg_body, attachment_abs_path)
     wa_result_str = str(wa_result).strip()
@@ -477,7 +623,7 @@ def handle_whatsapp_action(whatsapp_action: dict) -> str:
         logger.error(f"❌ WhatsApp message failed: {wa_result_str}")
     else:
         logger.info(f"✅ WhatsApp result: {wa_result_str}")
-    return wa_result
+    return f"{wa_result_str}{edit_note}"
 
 @with_observation
 def handle_telegram_action(telegram_action: dict) -> str:
@@ -494,6 +640,26 @@ def handle_telegram_action(telegram_action: dict) -> str:
 
     msg_body = telegram_action.get('message', '')
     file_paths = telegram_action.get('file_paths', [])
+
+    orig_body_norm = str(msg_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    confirm_res = request_action_confirmation(
+        platform_name="telegram",
+        to_recipient=to_name,
+        body_text=msg_body,
+        attachments=file_paths if isinstance(file_paths, list) else [],
+    )
+    if not confirm_res.get("approved"):
+        logger.info(f"🛑 Telegram message to {to_name} cancelled by user via Agent Panel.")
+        return f"[USER_CANCELLED] User cancelled sending the Telegram message to {to_name} from the preview panel. Do NOT retry."
+
+    msg_body = confirm_res.get("body", msg_body)
+    new_body_norm = str(msg_body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    edit_note = ""
+    if new_body_norm != orig_body_norm:
+        edit_note = f" [NOTE: User explicitly edited the body from UI to: '{msg_body}']"
+
     logger.info(f"🤖 Agent Sending Telegram to: {to_name}")
     tg_result = send_telegram_message(to_name, msg_body, file_paths)
     tg_result_str = str(tg_result).strip()
@@ -505,7 +671,7 @@ def handle_telegram_action(telegram_action: dict) -> str:
         logger.error(f"❌ Telegram message failed: {tg_result_str}")
     else:
         logger.info(f"✅ Telegram result: {tg_result_str}")
-    return tg_result
+    return f"{tg_result_str}{edit_note}"
 
 @with_observation
 def handle_system_controller(system_ctrl: dict) -> str:

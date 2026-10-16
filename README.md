@@ -2,7 +2,7 @@
 
 > **An AI Operating System that autonomously controls your PC, Android phone, local files, and lifelong memory — not just your code.**
 
-> **Open-Source · Live Mid-Execution Correction · Line-Drift-Free Editing · Lifelong Episodic Memory · Dual-Engine Voice · Proactive HITL · Android Termux SSH · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
+> **Open-Source · Live Mid-Execution Correction · Inline Comms Preview & Edit · Line-Drift-Free Editing · Lifelong Episodic Memory · Dual-Engine Voice · Proactive HITL · Android Termux SSH · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18.x-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -348,7 +348,7 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🗣️ | **Voice-First Multimodal** | Deepgram Nova-2 STT supercharged by a self-healing LTM vocabulary cache (auto-syncing entities from `lifetime_graph.json` and chat history), 85Hz high-pass audio conditioning, multi-alternative confidence scoring, and `<1ms` phonetic/contextual transcript repair (`kaf/caf` → `Kaif`, `word` ↔ `world`). Low-latency Sarvam TTS + Edge TTS streaming pipeline with progressive first-clause micro-chunking, persistent HTTP connection pooling, generation-locked barge-in, 15-min quota circuit breaker, LRU audio cache, and Hinglish tech/phonetic normalization (`.py` → `"dot pie"`), plus multimodal OCR and image generation. |
 | 🖱️ | **Vision-Based GUI Automation** | Set-of-Mark vision overlay with OpenCV edge detection. Two click paths — `click_by_id` with `expected_text` verification (preferred) and raw `click(x, y)` fallback. |
 | 🔌 | **Multi-LLM Auto-Failover** | Regolo, Gemini, OpenRouter, or local providers (Ollama, LM Studio, vLLM). Primary provider failure routes to fallback automatically. |
-| 🎨 | **Reactive UI Ecosystem** | ZMQ-powered PyQt5 Agent Panel streaming thought, action, and observation in real time. Markdown typing popup with async image preview and glass-morphism styling. |
+| 🎨 | **Reactive UI & Inline Comms Approval** | Bi-directional ZMQ-powered PyQt5 Agent Panel streaming live thoughts, actions, and observations, featuring an expandable glassmorphic preview card to inspect, edit inline, approve, or cancel outgoing Gmail, WhatsApp, and Telegram messages with ground-truth memory sync and loop-timeout pause. Markdown typing popup with async image preview. |
 | 🔒 | **Command-Level Security Guardrails** | `shlex` tokenization blocks destructive terminal commands. Local AES-encrypted tokens (`.enc`) for Gmail, Calendar, and Telegram sessions. |
 | ⚙️ | **ServiceWatchdog Resilience** | Monitors STT Popup, Baileys WhatsApp server, Mobile Bridge (`8090`), Telegram Remote Bot, and the Indexer Dashboard (`8080`). Auto-restarts crashed services with cooldown backoff and skips unauthenticated modules. |
 | 🪶 | **Runs on 4GB RAM** | Verified on an Intel i5-3210M (2012) with 4 GB RAM. Cloud LLM APIs + ONNX-based RapidOCR + `bge-small` embeddings keep the footprint tiny. |
@@ -504,13 +504,13 @@ flowchart TD
     FastBrain --> Search
 
     subgraph UI["🎨 UI & Visualization"]
-        AgentPanel["🖥️ ZMQ Agent Panel"]
+        AgentPanel["🖥️ Bi-Directional ZMQ Agent Panel<br/>Live Thoughts + Inline Comms Preview & Edit"]
         TypingPopup["📝 Markdown Typing Popup"]
         STTPopup["🗣️ STT Status Popup"]
         InputPopup["⌨️ Input Popup"]
     end
 
-    AgenticBrain -->|ZMQ PUB| AgentPanel
+    AgenticBrain <-->|ZMQ PUB / PUSH-PULL| AgentPanel
     FastBrain -->|typing_status.json| TypingPopup
     STT --> STTPopup
     InputPopup --> Router
@@ -552,7 +552,7 @@ Jarvis uses two brains to optimize for both speed and depth.
 | **System Controls** | Open or close apps, URLs, YouTube | Full OS automation via Python and shell |
 | **Hardware Toggles** | Volume, brightness, mute, screenshot, lock | Included within complex workflows |
 | **File Operations** | ❌ | ✅ Full CRUD, `repo_map`, `replace_block` |
-| **Communication** | ❌ | ✅ Gmail, WhatsApp, Telegram, Calendar |
+| **Communication** | ❌ | ✅ Gmail, WhatsApp, Telegram (with inline UI preview, live edit & approval), Calendar |
 | **Code Execution** | ❌ | ✅ `run_python_code`, `execute_terminal_command` |
 | **Memory Recall** | Rolling 10-turn history + `<System_Execution_Log>` + Ephemeral TTL artifacts | Full 15-day history + Lifetime vector-graph recall + Hybrid RAG + Ephemeral state |
 | **Live Mid-Execution Correction** | ❌ | ✅ Interruptible loop re-plans per step |
