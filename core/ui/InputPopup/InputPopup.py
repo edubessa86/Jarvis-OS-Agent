@@ -1,67 +1,199 @@
 import sys
 import os
-from PyQt5.QtWidgets import (QApplication, QDialog, QFrame, QTextEdit, QLabel, 
-                             QVBoxLayout, QHBoxLayout, QGraphicsOpacityEffect, 
-                             QGraphicsDropShadowEffect, QSizePolicy)
-from PyQt5.QtCore import (Qt, QPropertyAnimation, QParallelAnimationGroup, QSequentialAnimationGroup,
-                          QEasingCurve, QPoint, QRect, QRectF, pyqtProperty, QTimer, QAbstractAnimation)
-from PyQt5.QtGui import (QColor, QPainter, QLinearGradient, QPainterPath, 
-                         QPen, QFontDatabase, QFont, QPixmap)
+import math
+from PyQt5.QtWidgets import (
+    QApplication, QDialog, QFrame, QTextEdit, QLabel, QWidget,
+    QVBoxLayout, QHBoxLayout, QSizePolicy
+)
+from PyQt5.QtCore import (
+    Qt, QTimer, QPropertyAnimation, QParallelAnimationGroup,
+    QSequentialAnimationGroup, QEasingCurve, QPoint, QRect, QRectF,
+    QPointF, pyqtProperty, QAbstractAnimation, QSize, qInstallMessageHandler
+)
+from PyQt5.QtGui import (
+    QColor, QPainter, QLinearGradient, QRadialGradient, QPainterPath,
+    QPen, QFontDatabase, QFont, QPixmap, QPalette
+)
+
+
+def _input_qt_message_handler(mode, context, message):
+    suppressed = (
+        "OpenType support missing",
+        "QColor",
+        "Unable to set geometry",
+        "Resulting geometry",
+        "QWindowsWindow::setGeometry",
+    )
+    if any(s in message for s in suppressed):
+        return
+
+
+qInstallMessageHandler(_input_qt_message_handler)
+
 
 class GlassContainer(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._bgColor = QColor(15, 15, 20, 230)
-        self._borderColor = QColor(255, 255, 255, 35)
+        self.rgb = [191.0, 90.0, 242.0]
+        self.phase = 0.0
+        self._pulse = 0.0
+        self.corner_radius = 28.0
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMinimumSize(0, 0)
 
-    @pyqtProperty(QColor)
-    def bgColor(self):
-        return self._bgColor
+    def minimumSizeHint(self):
+        return QSize(0, 0)
 
-    @bgColor.setter
-    def bgColor(self, color):
-        self._bgColor = color
+    def update_visuals(self, rgb, phase):
+        self.rgb = rgb
+        self.phase = phase
         self.update()
 
-    @pyqtProperty(QColor)
-    def borderColor(self):
-        return self._borderColor
+    @pyqtProperty(float)
+    def pulseIntensity(self):
+        return self._pulse
 
-    @borderColor.setter
-    def borderColor(self, color):
-        self._borderColor = color
+    @pulseIntensity.setter
+    def pulseIntensity(self, val):
+        self._pulse = val
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.Antialiasing, True)
 
-        bgGradient = QLinearGradient(0, 0, self.width(), self.height())
-        r, g, b, a = self._bgColor.red(), self._bgColor.green(), self._bgColor.blue(), self._bgColor.alpha()
+        rect = QRectF(self.rect())
+        r, g, b = [max(0, min(255, int(c))) for c in self.rgb]
 
-        bgGradient.setColorAt(0.0, QColor(min(255, r + 15), min(255, g + 15), min(255, b + 25), a))
-        bgGradient.setColorAt(0.5, self._bgColor)
-        bgGradient.setColorAt(1.0, QColor(max(0, r - 8), max(0, g - 8), max(0, b - 10), min(255, a + 15)))
+        island_rect = rect.adjusted(5.0, 3.0, -5.0, -5.0)
+        radius = self.corner_radius
 
-        rect = self.rect().adjusted(2, 2, -2, -2)
+        bg_grad = QLinearGradient(island_rect.topLeft(), island_rect.bottomLeft())
+        bg_grad.setColorAt(0.0, QColor(31, 32, 42, 252))
+        bg_grad.setColorAt(0.5, QColor(18, 19, 26, 254))
+        bg_grad.setColorAt(1.0, QColor(9, 10, 15, 255))
+        painter.setBrush(bg_grad)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(island_rect, radius, radius)
+
+        ambient = QRadialGradient(
+            QPointF(island_rect.left() + island_rect.width() * 0.22, island_rect.top()),
+            island_rect.width() * 0.6
+        )
+        ambient.setColorAt(0.0, QColor(r, g, b, 36))
+        ambient.setColorAt(0.55, QColor(r, g, b, 12))
+        ambient.setColorAt(1.0, QColor(r, g, b, 0))
+        painter.setBrush(ambient)
+        painter.drawRoundedRect(island_rect, radius, radius)
+
+        bloom = QRadialGradient(
+            QPointF(island_rect.center().x(), island_rect.bottom()),
+            island_rect.width() * 0.55
+        )
+        bloom.setColorAt(0.0, QColor(r, g, b, 26))
+        bloom.setColorAt(1.0, QColor(r, g, b, 0))
+        painter.setBrush(bloom)
+        painter.drawRoundedRect(island_rect, radius, radius)
+
+        cx = island_rect.center().x()
+        cy = island_rect.center().y()
+        span = max(island_rect.width(), island_rect.height()) * 0.7
+        dx = math.cos(self.phase) * span
+        dy = math.sin(self.phase) * span
+
+        boost = int(self._pulse * 90)
+        border_grad = QLinearGradient(
+            QPointF(cx - dx, cy - dy),
+            QPointF(cx + dx, cy + dy)
+        )
+        border_grad.setColorAt(0.0, QColor(255, 255, 255, min(255, 115 + boost // 2)))
+        border_grad.setColorAt(0.35, QColor(255, 255, 255, 24))
+        border_grad.setColorAt(0.72, QColor(r, g, b, min(255, 200 + boost // 3)))
+        border_grad.setColorAt(1.0, QColor(255, 255, 255, 60))
+
+        border_pen = QPen(border_grad, 1.35 + self._pulse * 0.35)
+        painter.setPen(border_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            island_rect.adjusted(0.7, 0.7, -0.7, -0.7),
+            radius, radius
+        )
+
+        shine_rect = island_rect.adjusted(
+            22.0, 1.2, -22.0, -(island_rect.height() - 2.0)
+        )
+        shine_grad = QLinearGradient(shine_rect.topLeft(), shine_rect.topRight())
+        shine_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        shine_grad.setColorAt(0.5, QColor(255, 255, 255, 72))
+        shine_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(shine_grad)
+        painter.drawRect(shine_rect)
+
+
+class EnterIndicator(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(28, 28)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.rgb = [191.0, 90.0, 242.0]
+        self._opacity = 0.0
+
+    @pyqtProperty(float)
+    def indicatorOpacity(self):
+        return self._opacity
+
+    @indicatorOpacity.setter
+    def indicatorOpacity(self, val):
+        self._opacity = val
+        self.update()
+
+    def set_visuals(self, rgb):
+        self.rgb = rgb
+        self.update()
+
+    def paintEvent(self, event):
+        if self._opacity < 0.02:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        r, g, b = [max(0, min(255, int(c))) for c in self.rgb]
+        alpha = int(self._opacity * 255)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(r, g, b, int(alpha * 0.15)))
+        painter.drawEllipse(QPointF(cx, cy), 12.5, 12.5)
+
+        painter.setBrush(QColor(r, g, b, int(alpha * 0.22)))
+        painter.drawEllipse(QPointF(cx, cy), 10.0, 10.0)
+
+        pen = QPen(QColor(255, 255, 255, alpha), 1.9,
+                   Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
         path = QPainterPath()
-        path.addRoundedRect(QRectF(rect), 24.0, 24.0)
-
-        painter.fillPath(path, bgGradient)
-
-        innerHighlight = QPainterPath()
-        innerHighlight.addRoundedRect(QRectF(rect.adjusted(1, 1, -1, -1)), 23.0, 23.0)
-        painter.setPen(QPen(QColor(255, 255, 255, 25), 1.0))
-        painter.drawPath(innerHighlight)
-
-        painter.setPen(QPen(self._borderColor, 1.5))
+        path.moveTo(cx + 4.5, cy - 5.5)
+        path.lineTo(cx + 4.5, cy + 3.5)
+        path.lineTo(cx - 3.0, cy + 3.5)
         painter.drawPath(path)
 
+        arrow = QPainterPath()
+        arrow.moveTo(cx - 6.5, cy + 1.0)
+        arrow.lineTo(cx - 3.5, cy + 3.5)
+        arrow.lineTo(cx - 6.5, cy + 6.0)
+        painter.drawPath(arrow)
+
+
 class SmartInput(QTextEdit):
-    def __init__(self, parentPopup, parent=None):
+    def __init__(self, parent_popup, parent=None):
         super().__init__(parent)
-        self.m_parentPopup = parentPopup
+        self.parent_popup = parent_popup
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setAcceptRichText(False)
 
     def insertFromMimeData(self, source):
@@ -73,152 +205,233 @@ class SmartInput(QTextEdit):
             if event.modifiers() & Qt.ShiftModifier:
                 super().keyPressEvent(event)
             else:
-                self.m_parentPopup.triggerAccept()
+                self.parent_popup.triggerAccept()
         elif event.key() == Qt.Key_Escape:
-            self.m_parentPopup.triggerReject()
+            self.parent_popup.triggerReject()
         else:
             super().keyPressEvent(event)
 
+
 class InputPopup(QDialog):
+    WIDTH = 720
+    OUTER_MARGINS = (14, 10, 14, 14)
+    CONTAINER_MARGINS = (26, 18, 26, 18)
+    CONTAINER_SPACING = 16
+    WINDOW_BOTTOM_OFFSET = 160
+    MIN_TEXT_HEIGHT = 30
+    MAX_TEXT_HEIGHT = 180
+    VERTICAL_OVERHEAD = 70
+    GLOW_INTERVAL_MS = 36
+    GLOW_PHASE_STEP = 0.045
+    ENTRY_FADE_MS = 280
+    ENTRY_SLIDE_MS = 360
+    EXIT_FADE_MS = 260
+    EXIT_SLIDE_MS = 300
+    RESIZE_MS = 340
+    PULSE_PERIOD_MS = 1200
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        qInstallMessageHandler(_input_qt_message_handler)
+
         self.isClosing = False
         self.isTypingMode = False
         self.commandText = ""
         self.resizeAnimGroup = None
         self.outAnimGroup = None
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-        font_path = os.path.join(base_dir, "Data", "fonts", "english.ttf")
-        
-        fontId = QFontDatabase.addApplicationFont(font_path)
-        if fontId != -1:
-            self.customFontFamily = QFontDatabase.applicationFontFamilies(fontId)[0]
-        else:
-            self.customFontFamily = "Segoe UI"
+        self.gradient_phase = 0.0
+        self.current_rgb = [191.0, 90.0, 242.0]
+        self.target_rgb = [191.0, 90.0, 242.0]
 
-        self.initUI(base_dir)
-        QTimer.singleShot(50, self.forceFocus)
+        self._load_fonts()
+        self.initUI()
 
-    def initUI(self, base_dir):
+        self.glow_timer = QTimer(self)
+        self.glow_timer.timeout.connect(self.update_glow_effect)
+        self.glow_timer.start(self.GLOW_INTERVAL_MS)
+
+        QTimer.singleShot(60, self.forceFocus)
+
+    def _load_fonts(self):
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        eng_path = os.path.join(base_dir, "Data", "fonts", "english.ttf")
+        hin_path = os.path.join(base_dir, "Data", "fonts", "devangri.ttf")
+
+        self.font_eng = QFont("Segoe UI", 13, QFont.Medium)
+        eng_id = QFontDatabase.addApplicationFont(eng_path)
+        if eng_id != -1:
+            fams = QFontDatabase.applicationFontFamilies(eng_id)
+            if fams:
+                self.font_eng = QFont(fams[0], 13, QFont.Medium)
+
+        self.font_hin = QFont("Nirmala UI", 14, QFont.Medium)
+        hin_id = QFontDatabase.addApplicationFont(hin_path)
+        if hin_id != -1:
+            fams = QFontDatabase.applicationFontFamilies(hin_id)
+            if fams:
+                self.font_hin = QFont(fams[0], 14, QFont.Medium)
+
+        fallback_chain = [self.font_hin.family(), "Nirmala UI",
+                          "Segoe UI", "Mangal"]
+        try:
+            QFont.insertSubstitutions(self.font_eng.family(), fallback_chain)
+            QFont.insertSubstitutions("MS Shell Dlg 2", fallback_chain)
+            QFont.insertSubstitutions("Sansation", fallback_chain)
+        except Exception:
+            pass
+
+        self.base_dir = base_dir
+
+    def initUI(self):
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedWidth(720)
+        self.setFixedWidth(self.WIDTH)
 
-        outerLayout = QVBoxLayout(self)
-        outerLayout.setContentsMargins(30, 30, 30, 35)
+        self.outer_layout = QVBoxLayout(self)
+        self.outer_layout.setContentsMargins(*self.OUTER_MARGINS)
+        self.outer_layout.setSizeConstraint(QVBoxLayout.SetNoConstraint)
 
         self.container = GlassContainer(self)
-        
-        self.shadow = QGraphicsDropShadowEffect(self)
-        self.shadow.setBlurRadius(50)
-        self.shadow.setColor(QColor(0, 0, 0, 160))
-        self.shadow.setOffset(0, 10)
-        self.container.setGraphicsEffect(self.shadow)
-        
-        containerLayout = QHBoxLayout(self.container)
-        containerLayout.setContentsMargins(28, 20, 26, 20)
-        containerLayout.setSpacing(20)
-        containerLayout.setAlignment(Qt.AlignTop)
+        self.container.setObjectName("Island")
+        self.container.setMinimumSize(0, 0)
 
-        self.iconLabel = QLabel(self.container)
-        icon_path = os.path.join(base_dir, "Data", "icons", "jarvis_icon.png")
+        container_layout = QHBoxLayout(self.container)
+        container_layout.setContentsMargins(*self.CONTAINER_MARGINS)
+        container_layout.setSpacing(self.CONTAINER_SPACING)
+        container_layout.setAlignment(Qt.AlignTop)
+
+        self.icon_label = QLabel(self.container)
+        self.icon_label.setFixedSize(28, 28)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+
+        icon_path = os.path.join(self.base_dir, "Data", "icons", "jarvis_icon.png")
         pixmap = QPixmap(icon_path)
         if not pixmap.isNull():
-            self.iconLabel.setPixmap(pixmap.scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.icon_label.setPixmap(pixmap.scaled(
+                28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.icon_label.setStyleSheet(
+                "background: transparent; border: none;"
+            )
         else:
-            self.iconLabel.setText("⚡")
-            self.iconLabel.setFont(QFont("Segoe UI Emoji", 18))
-            self.iconLabel.setStyleSheet("color: rgba(255,255,255,0.85);")
-        self.iconLabel.setStyleSheet("background: transparent; margin-top: 0px;")
-        containerLayout.addWidget(self.iconLabel, 0, Qt.AlignTop)
+            self.icon_label.setText("J")
+            self.icon_label.setFont(QFont(self.font_eng.family(), 18, QFont.Black))
+            self.icon_label.setStyleSheet(
+                "color: rgba(191, 90, 242, 0.95); "
+                "background: transparent; border: none;"
+            )
+
+        container_layout.addWidget(self.icon_label, 0, Qt.AlignTop)
 
         self.inputField = SmartInput(self, self.container)
         self.inputField.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.inputField.setPlaceholderText("What do you need?")
         self.inputField.setStyleSheet(f"""
-            QTextEdit {{ background: transparent; color: rgba(255, 255, 255, 0.98); border: none; 
-            font-family: "{self.customFontFamily}"; font-size: 18px; letter-spacing: 0.5px; 
-            selection-background-color: rgba(0, 240, 255, 0.4); selection-color: #FFFFFF; line-height: 1.6; }}
-            QTextEdit::placeholder {{ color: rgba(255, 255, 255, 0.25); font-weight: 300; }}
-            QScrollBar:vertical {{ border: none; background: transparent; width: 6px; margin: 0px; }}
-            QScrollBar::handle:vertical {{ background: rgba(255, 255, 255, 0.2); border-radius: 3px; min-height: 20px; }}
-            QScrollBar::handle:vertical:hover {{ background: rgba(0, 240, 255, 0.6); }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ border: none; background: none; height: 0px; }}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+            QTextEdit {{
+                background: transparent;
+                color: rgba(255, 255, 255, 0.98);
+                border: none;
+                font-family: "{self.font_eng.family()}", "{self.font_hin.family()}", "Segoe UI", sans-serif;
+                font-size: 13.5pt;
+                letter-spacing: 0.4px;
+                selection-background-color: rgba(191, 90, 242, 0.45);
+                selection-color: #FFFFFF;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(255, 255, 255, 0.22);
+                border-radius: 3px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(191, 90, 242, 0.65);
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
         """)
-        containerLayout.addWidget(self.inputField)
 
-        self.enterIndicator = QLabel("↵", self.container)
-        self.enterIndicator.setFont(QFont("Segoe UI", 22, QFont.Bold))
-        self.enterIndicator.setStyleSheet("color: #00F0FF; background: transparent;")
-        self.enterIndicator.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        try:
+            pal = self.inputField.palette()
+            pal.setColor(QPalette.PlaceholderText, QColor(255, 255, 255, 72))
+            self.inputField.setPalette(pal)
+        except AttributeError:
+            pass
 
-        self.indicatorOpacity = QGraphicsOpacityEffect(self.enterIndicator)
-        self.indicatorOpacity.setOpacity(0.0)
-        self.enterIndicator.setGraphicsEffect(self.indicatorOpacity)
-        containerLayout.addWidget(self.enterIndicator, 0, Qt.AlignTop)
+        container_layout.addWidget(self.inputField, 1)
 
-        outerLayout.addWidget(self.container)
+        self.enter_indicator = EnterIndicator(self.container)
+        self.enter_indicator.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        container_layout.addWidget(self.enter_indicator, 0, Qt.AlignTop)
 
+        self.outer_layout.addWidget(self.container)
         self.inputField.textChanged.connect(self.onTextChanged)
 
+        self.indicator_anim = QPropertyAnimation(
+            self.enter_indicator, b"indicatorOpacity", self)
+        self.indicator_anim.setDuration(400)
+        self.indicator_anim.setEasingCurve(QEasingCurve.InOutSine)
+
+        self.pulse_anim = QSequentialAnimationGroup(self)
+        pulse_up = QPropertyAnimation(self.container, b"pulseIntensity")
+        pulse_up.setDuration(self.PULSE_PERIOD_MS)
+        pulse_up.setStartValue(0.0)
+        pulse_up.setEndValue(1.0)
+        pulse_up.setEasingCurve(QEasingCurve.InOutSine)
+        pulse_down = QPropertyAnimation(self.container, b"pulseIntensity")
+        pulse_down.setDuration(self.PULSE_PERIOD_MS)
+        pulse_down.setStartValue(1.0)
+        pulse_down.setEndValue(0.0)
+        pulse_down.setEasingCurve(QEasingCurve.InOutSine)
+        self.pulse_anim.addAnimation(pulse_up)
+        self.pulse_anim.addAnimation(pulse_down)
+        self.pulse_anim.setLoopCount(-1)
+
         self.setWindowOpacity(0.0)
-        screenGeometry = QApplication.primaryScreen().availableGeometry()
-        self.targetX = (screenGeometry.width() - self.width()) // 2
-        self.baseBottomY = screenGeometry.height() - 160
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.targetX = (screen.width() - self.width()) // 2
+        self.baseBottomY = screen.height() - self.WINDOW_BOTTOM_OFFSET
 
         self.adjustHeight(False)
 
-        self.entryAnim = QParallelAnimationGroup(self)
-        self.fadeIn = QPropertyAnimation(self, b"windowOpacity")
-        self.fadeIn.setDuration(350)
-        self.fadeIn.setStartValue(0.0)
-        self.fadeIn.setEndValue(1.0)
-        self.fadeIn.setEasingCurve(QEasingCurve.OutCubic)
+        self.entry_anim_group = QParallelAnimationGroup(self)
+        fade_in = QPropertyAnimation(self, b"windowOpacity")
+        fade_in.setDuration(self.ENTRY_FADE_MS)
+        fade_in.setStartValue(0.0)
+        fade_in.setEndValue(1.0)
+        fade_in.setEasingCurve(QEasingCurve.OutCubic)
 
-        self.slideUp = QPropertyAnimation(self, b"pos")
-        self.slideUp.setDuration(650)
-        self.slideUp.setStartValue(QPoint(self.targetX, self.y() + 50))
-        self.slideUp.setEndValue(QPoint(self.targetX, self.y()))
-        self.slideUp.setEasingCurve(QEasingCurve.OutBack)
+        slide_up = QPropertyAnimation(self, b"pos")
+        slide_up.setDuration(self.ENTRY_SLIDE_MS)
+        slide_up.setStartValue(QPoint(self.targetX, self.y() + 28))
+        slide_up.setEndValue(QPoint(self.targetX, self.y()))
+        slide_up.setEasingCurve(QEasingCurve.OutQuint)
 
-        self.entryAnim.addAnimation(self.fadeIn)
-        self.entryAnim.addAnimation(self.slideUp)
-        self.entryAnim.start(QAbstractAnimation.DeleteWhenStopped)
+        self.entry_anim_group.addAnimation(fade_in)
+        self.entry_anim_group.addAnimation(slide_up)
+        self.entry_anim_group.start(QAbstractAnimation.DeleteWhenStopped)
 
-        self.containerAnim = QParallelAnimationGroup(self)
-        self.bgAnim = QPropertyAnimation(self.container, b"bgColor", self)
-        self.borderAnim = QPropertyAnimation(self.container, b"borderColor", self)
-        self.indAnim = QPropertyAnimation(self.indicatorOpacity, b"opacity", self)
+    def update_glow_effect(self):
+        self.gradient_phase += self.GLOW_PHASE_STEP
+        if self.gradient_phase >= math.pi * 2:
+            self.gradient_phase -= math.pi * 2
 
-        self.bgAnim.setDuration(400)
-        self.bgAnim.setEasingCurve(QEasingCurve.InOutSine)
-        self.borderAnim.setDuration(400)
-        self.borderAnim.setEasingCurve(QEasingCurve.InOutSine)
-        self.indAnim.setDuration(400)
-        self.indAnim.setEasingCurve(QEasingCurve.InOutSine)
+        for i in range(3):
+            self.current_rgb[i] += (self.target_rgb[i] - self.current_rgb[i]) * 0.16
 
-        self.containerAnim.addAnimation(self.bgAnim)
-        self.containerAnim.addAnimation(self.borderAnim)
-        self.containerAnim.addAnimation(self.indAnim)
-
-        self.typingPulseAnim = QSequentialAnimationGroup(self)
-        anim1 = QPropertyAnimation(self.container, b"borderColor")
-        anim1.setDuration(1200)
-        anim1.setStartValue(QColor(0, 240, 255, 120))
-        anim1.setEndValue(QColor(0, 240, 255, 255))
-        anim1.setEasingCurve(QEasingCurve.InOutSine)
-        
-        anim2 = QPropertyAnimation(self.container, b"borderColor")
-        anim2.setDuration(1200)
-        anim2.setStartValue(QColor(0, 240, 255, 255))
-        anim2.setEndValue(QColor(0, 240, 255, 120))
-        anim2.setEasingCurve(QEasingCurve.InOutSine)
-        
-        self.typingPulseAnim.addAnimation(anim1)
-        self.typingPulseAnim.addAnimation(anim2)
-        self.typingPulseAnim.setLoopCount(-1)
+        self.container.update_visuals(self.current_rgb, self.gradient_phase)
+        self.enter_indicator.set_visuals(self.current_rgb)
 
     def forceFocus(self):
         self.activateWindow()
@@ -232,108 +445,114 @@ class InputPopup(QDialog):
         if hasText != self.isTypingMode:
             self.isTypingMode = hasText
 
-            self.containerAnim.stop()
-            if self.typingPulseAnim.state() == QAbstractAnimation.Running:
-                self.typingPulseAnim.stop()
+            if self.pulse_anim.state() == QAbstractAnimation.Running:
+                self.pulse_anim.stop()
+            self.container.pulseIntensity = 0.0
 
-            if self.isTypingMode:
-                self.bgAnim.setEndValue(QColor(8, 8, 12, 240))
-                self.borderAnim.setEndValue(QColor(0, 240, 255, 120)) 
-                self.indAnim.setEndValue(0.95)
-                self.containerAnim.start()
-                self.typingPulseAnim.start()
+            self.indicator_anim.stop()
+            self.indicator_anim.setStartValue(self.enter_indicator.indicatorOpacity)
+            self.indicator_anim.setEndValue(0.95 if hasText else 0.0)
+            self.indicator_anim.start()
+
+            if hasText:
+                self.target_rgb = [200.0, 100.0, 252.0]
+                self.pulse_anim.start()
             else:
-                self.bgAnim.setEndValue(QColor(15, 15, 20, 230))
-                self.borderAnim.setEndValue(QColor(255, 255, 255, 35))
-                self.indAnim.setEndValue(0.0)
-                self.containerAnim.start()
+                self.target_rgb = [191.0, 90.0, 242.0]
 
         self.adjustHeight(True)
 
     def adjustHeight(self, animate):
-        docHeight = int(self.inputField.document().size().height())
-        newTextHeight = max(30, min(docHeight, 180))
+        doc_height = int(self.inputField.document().size().height())
+        new_text_height = max(self.MIN_TEXT_HEIGHT,
+                              min(doc_height, self.MAX_TEXT_HEIGHT))
 
-        if docHeight > 180:
+        if doc_height > self.MAX_TEXT_HEIGHT:
             self.inputField.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         else:
             self.inputField.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        newWindowHeight = newTextHeight + 85
+        new_window_height = new_text_height + self.VERTICAL_OVERHEAD
 
-        if self.height() != newWindowHeight:
-            newY = self.baseBottomY - newWindowHeight
+        if self.height() == new_window_height:
+            return
 
-            if animate and self.isVisible():
-                if self.resizeAnimGroup:
-                    if self.resizeAnimGroup.state() == QAbstractAnimation.Running:
-                        self.resizeAnimGroup.stop()
-                    self.resizeAnimGroup.deleteLater()
+        new_y = self.baseBottomY - new_window_height
 
-                self.resizeAnimGroup = QParallelAnimationGroup(self)
+        if animate and self.isVisible():
+            if self.resizeAnimGroup is not None:
+                if self.resizeAnimGroup.state() == QAbstractAnimation.Running:
+                    self.resizeAnimGroup.stop()
+                self.resizeAnimGroup.deleteLater()
 
-                winAnim = QPropertyAnimation(self, b"geometry", self)
-                winAnim.setDuration(400)
-                winAnim.setStartValue(self.geometry())
-                winAnim.setEndValue(QRect(self.targetX, newY, self.width(), newWindowHeight))
-                winAnim.setEasingCurve(QEasingCurve.OutQuart)
+            self.resizeAnimGroup = QParallelAnimationGroup(self)
 
-                txtMinAnim = QPropertyAnimation(self.inputField, b"minimumHeight", self)
-                txtMinAnim.setDuration(400)
-                txtMinAnim.setStartValue(self.inputField.height())
-                txtMinAnim.setEndValue(newTextHeight)
-                txtMinAnim.setEasingCurve(QEasingCurve.OutQuart)
+            win_anim = QPropertyAnimation(self, b"geometry", self)
+            win_anim.setDuration(self.RESIZE_MS)
+            win_anim.setStartValue(self.geometry())
+            win_anim.setEndValue(QRect(self.targetX, new_y,
+                                       self.width(), new_window_height))
+            win_anim.setEasingCurve(QEasingCurve.OutQuart)
 
-                txtMaxAnim = QPropertyAnimation(self.inputField, b"maximumHeight", self)
-                txtMaxAnim.setDuration(400)
-                txtMaxAnim.setStartValue(self.inputField.height())
-                txtMaxAnim.setEndValue(newTextHeight)
-                txtMaxAnim.setEasingCurve(QEasingCurve.OutQuart)
+            txt_min = QPropertyAnimation(self.inputField, b"minimumHeight", self)
+            txt_min.setDuration(self.RESIZE_MS)
+            txt_min.setStartValue(self.inputField.height())
+            txt_min.setEndValue(new_text_height)
+            txt_min.setEasingCurve(QEasingCurve.OutQuart)
 
-                self.resizeAnimGroup.addAnimation(winAnim)
-                self.resizeAnimGroup.addAnimation(txtMinAnim)
-                self.resizeAnimGroup.addAnimation(txtMaxAnim)
+            txt_max = QPropertyAnimation(self.inputField, b"maximumHeight", self)
+            txt_max.setDuration(self.RESIZE_MS)
+            txt_max.setStartValue(self.inputField.height())
+            txt_max.setEndValue(new_text_height)
+            txt_max.setEasingCurve(QEasingCurve.OutQuart)
 
-                self.resizeAnimGroup.start()
-            else:
-                self.inputField.setMinimumHeight(newTextHeight)
-                self.inputField.setMaximumHeight(newTextHeight)
-                self.setGeometry(self.targetX, newY, self.width(), newWindowHeight)
+            self.resizeAnimGroup.addAnimation(win_anim)
+            self.resizeAnimGroup.addAnimation(txt_min)
+            self.resizeAnimGroup.addAnimation(txt_max)
+            self.resizeAnimGroup.start()
+        else:
+            self.inputField.setMinimumHeight(new_text_height)
+            self.inputField.setMaximumHeight(new_text_height)
+            self.setGeometry(self.targetX, new_y, self.width(), new_window_height)
 
     def triggerAccept(self):
-        if self.isClosing: return
+        if self.isClosing:
+            return
         self.isClosing = True
         self.commandText = self.inputField.toPlainText().strip()
         self.fadeOutAndClose(True)
 
     def triggerReject(self):
-        if self.isClosing: return
+        if self.isClosing:
+            return
         self.isClosing = True
         self.fadeOutAndClose(False)
 
-    def fadeOutAndClose(self, isAccepting):
+    def fadeOutAndClose(self, is_accepting):
+        if self.pulse_anim.state() == QAbstractAnimation.Running:
+            self.pulse_anim.stop()
+        self.indicator_anim.stop()
+        self.glow_timer.stop()
+
         self.outAnimGroup = QParallelAnimationGroup(self)
 
-        fadeOut = QPropertyAnimation(self, b"windowOpacity")
-        fadeOut.setDuration(250)
-        fadeOut.setStartValue(self.windowOpacity())
-        fadeOut.setEndValue(0.0)
-        fadeOut.setEasingCurve(QEasingCurve.InCubic)
+        fade_out = QPropertyAnimation(self, b"windowOpacity")
+        fade_out.setDuration(self.EXIT_FADE_MS)
+        fade_out.setStartValue(self.windowOpacity())
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.InCubic)
 
-        slideDown = QPropertyAnimation(self, b"pos")
-        slideDown.setDuration(400)
-        slideDown.setStartValue(self.pos())
-        slideDown.setEndValue(QPoint(self.x(), self.y() + 30))
-        slideDown.setEasingCurve(QEasingCurve.InQuart)
+        slide_down = QPropertyAnimation(self, b"pos")
+        slide_down.setDuration(self.EXIT_SLIDE_MS)
+        slide_down.setStartValue(self.pos())
+        slide_down.setEndValue(QPoint(self.x(), self.y() + 24))
+        slide_down.setEasingCurve(QEasingCurve.InQuart)
 
-        self.outAnimGroup.addAnimation(fadeOut)
-        self.outAnimGroup.addAnimation(slideDown)
-
-        if isAccepting:
-            self.outAnimGroup.finished.connect(self.acceptDialog)
-        else:
-            self.outAnimGroup.finished.connect(self.rejectDialog)
-
+        self.outAnimGroup.addAnimation(fade_out)
+        self.outAnimGroup.addAnimation(slide_down)
+        self.outAnimGroup.finished.connect(
+            self.acceptDialog if is_accepting else self.rejectDialog
+        )
         self.outAnimGroup.start()
 
     def acceptDialog(self):
@@ -345,11 +564,11 @@ class InputPopup(QDialog):
     def getCommandText(self):
         return self.commandText
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     popup = InputPopup()
     popup.exec_()
-    
     command = popup.getCommandText()
     if command:
         print(f"JARVIS_CMD:::{command}", flush=True)

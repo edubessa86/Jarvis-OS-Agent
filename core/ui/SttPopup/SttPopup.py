@@ -35,11 +35,6 @@ def _stt_qt_message_handler(mode, context, message):
 
 qInstallMessageHandler(_stt_qt_message_handler)
 
-
-# ==================================================================
-#                       WAVEFORM INDICATOR
-# ==================================================================
-
 class WaveformIndicator(QWidget):
     """Animated 5-bar waveform. Bigger, smoother, with distinct
     visual identity per state (listening / understanding / transcribed)."""
@@ -71,12 +66,10 @@ class WaveformIndicator(QWidget):
         self.phase += 0.12
         if self.is_animating:
             if self.mode == "understanding":
-                # Smooth mathematical pulse — feels "thinking"
                 for i in range(5):
                     wave = math.sin(self.phase * 2.5 + i * 0.8)
                     self.target_bars[i] = 5.0 + abs(wave) * 16.0
             else:
-                # Organic random — feels "hearing voice"
                 for i in range(5):
                     self.target_bars[i] = random.uniform(4.5, 20.0)
 
@@ -95,16 +88,12 @@ class WaveformIndicator(QWidget):
 
         cx, cy = self.width() / 2.0, self.height() / 2.0
 
-        # --- Transcribed: green check ---
         if self.mode == "transcribed":
             painter.setPen(Qt.NoPen)
-            # Soft outer ring
             painter.setBrush(QColor(50, 215, 75, 55))
             painter.drawEllipse(QPointF(cx, cy), 11.5, 11.5)
-            # Solid green circle
             painter.setBrush(QColor(50, 215, 75, 240))
             painter.drawEllipse(QPointF(cx, cy), 9.0, 9.0)
-            # Check mark
             check_pen = QPen(QColor(255, 255, 255, 255), 2.2,
                              Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(check_pen)
@@ -115,7 +104,6 @@ class WaveformIndicator(QWidget):
             painter.drawPath(path)
             return
 
-        # --- Listening / Understanding: bars ---
         base_col = QColor(10, 132, 255, 245) if self.mode == "listening" \
             else QColor(191, 90, 242, 245)
 
@@ -131,7 +119,6 @@ class WaveformIndicator(QWidget):
             height = max(4.0, min(self.bars[i], max_h))
             y = (self.height() - height) / 2.0
 
-            # Glow under bar
             glow = QColor(base_col)
             glow.setAlpha(55)
             painter.setBrush(glow)
@@ -140,7 +127,6 @@ class WaveformIndicator(QWidget):
                 (bar_width + 2.0) / 2.0, (bar_width + 2.0) / 2.0
             )
 
-            # Main bar with vertical gradient
             grad = QLinearGradient(x, y, x, y + height)
             grad.setColorAt(0.0, QColor(base_col.red(), base_col.green(),
                                         base_col.blue(), 255))
@@ -152,10 +138,6 @@ class WaveformIndicator(QWidget):
                 bar_width / 2.0, bar_width / 2.0
             )
 
-
-# ==================================================================
-#                          ISLAND FRAME
-# ==================================================================
 
 class IslandFrame(QFrame):
     """Rounded dark island. No external shadow — only internal
@@ -184,11 +166,9 @@ class IslandFrame(QFrame):
         rect = QRectF(self.rect())
         r, g, b = [max(0, min(255, int(c))) for c in self.rgb]
 
-        # Small inset so the animated border has breathing room
         island_rect = rect.adjusted(5.0, 3.0, -5.0, -5.0)
         radius = self.corner_radius
 
-        # --- Main background ---
         bg_grad = QLinearGradient(island_rect.topLeft(), island_rect.bottomLeft())
         bg_grad.setColorAt(0.0, QColor(31, 32, 42, 252))
         bg_grad.setColorAt(0.5, QColor(18, 19, 26, 254))
@@ -198,7 +178,6 @@ class IslandFrame(QFrame):
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(island_rect, radius, radius)
 
-        # --- Ambient glow (top-left, color-tinted) ---
         ambient_glow = QRadialGradient(
             QPointF(island_rect.left() + island_rect.width() * 0.22,
                     island_rect.top()),
@@ -210,7 +189,6 @@ class IslandFrame(QFrame):
         painter.setBrush(ambient_glow)
         painter.drawRoundedRect(island_rect, radius, radius)
 
-        # --- Bottom color bloom ---
         bloom = QRadialGradient(
             QPointF(island_rect.center().x(), island_rect.bottom()),
             island_rect.width() * 0.55
@@ -220,7 +198,6 @@ class IslandFrame(QFrame):
         painter.setBrush(bloom)
         painter.drawRoundedRect(island_rect, radius, radius)
 
-        # --- Animated gradient border (rotates around island) ---
         cx = island_rect.center().x()
         cy = island_rect.center().y()
         span = max(island_rect.width(), island_rect.height()) * 0.7
@@ -244,7 +221,6 @@ class IslandFrame(QFrame):
             radius, radius
         )
 
-        # --- Top inner shine ---
         shine_rect = island_rect.adjusted(
             22.0, 1.2, -22.0, -(island_rect.height() - 2.0)
         )
@@ -257,12 +233,7 @@ class IslandFrame(QFrame):
         painter.drawRect(shine_rect)
 
 
-# ==================================================================
-#                            STT POPUP
-# ==================================================================
-
 class STTPopup(QWidget):
-    # -- Design tokens -------------------------------------------------
     ISLAND_HEIGHT = 65
     OUTER_MARGINS = (8, 5, 8, 7)
     ISLAND_PADDING = (24, 0, 26, 0)
@@ -329,7 +300,6 @@ class STTPopup(QWidget):
         self.udpSocket.readyRead.connect(self.readPendingDatagrams)
         self.process_status_update({"status": "idle", "text": ""})
 
-    # ----------------------------------------------------------------
     def update_glow_effect(self):
         self.gradient_phase += 0.045
         if self.gradient_phase >= math.pi * 2:
@@ -360,7 +330,6 @@ class STTPopup(QWidget):
             except Exception:
                 pass
 
-    # ----------------------------------------------------------------
     def initUI(self):
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
@@ -401,7 +370,6 @@ class STTPopup(QWidget):
         self.setWindowOpacity(0.0)
         self.hide()
 
-    # ----------------------------------------------------------------
     def format_text(self, text):
         words = text.strip().split()
         if len(words) > 7:
@@ -424,7 +392,6 @@ class STTPopup(QWidget):
         )
         self.text_label.setText(text)
 
-    # ----------------------------------------------------------------
     def calculate_target_geometry(self):
         self.text_label.adjustSize()
         island_width = (
@@ -456,7 +423,6 @@ class STTPopup(QWidget):
             else:
                 self.setGeometry(new_geometry)
 
-    # ----------------------------------------------------------------
     def show_panel(self):
         if self.hide_anim_group.state() == QPropertyAnimation.Running:
             self.hide_anim_group.stop()
@@ -527,7 +493,6 @@ class STTPopup(QWidget):
         self.process_status_update({"status": self.current_state,
                                     "text": self.last_text})
 
-    # ----------------------------------------------------------------
     def process_status_update(self, data):
         self.current_state = data.get("status", "idle")
         raw_text = data.get("text", "")
