@@ -299,15 +299,18 @@ CONTENT:
 @with_observation
 def handle_terminal_command(terminal_cmd: dict) -> str:
     cmd = terminal_cmd.get('command')
-    if not cmd: return "Terminal command missing 'command' parameter."
-    logger.info(f"🤖 Agent executing Terminal Command: {cmd}")
-    return execute_terminal_command(cmd)
+    if not cmd:
+        return "[ERROR] Terminal command missing 'command' parameter."
+    timeout_sec = _safe_int(terminal_cmd.get('timeout_seconds'), default=30)
+    logger.info(f"🤖 Agent executing Terminal Command: {cmd} (timeout={timeout_sec}s)")
+    return execute_terminal_command(cmd, timeout_seconds=timeout_sec)
 
 @with_observation
 def handle_python_code(python_cmd: dict) -> str:
     code = python_cmd.get('code_string')
-    if not code: return "Python command missing 'code_string' parameter."
-    logger.info(f"🤖 Agent executing Python Script.")
+    if not code:
+        return "[ERROR] Python command missing 'code_string' parameter."
+    logger.info("🤖 Agent executing Python Script.")
     return run_python_code(code)
 
 @with_observation

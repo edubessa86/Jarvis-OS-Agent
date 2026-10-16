@@ -109,7 +109,6 @@ def optimize_observation(text: str, max_chars: int = 10000) -> str:
 
 
 def _is_failure_prefix(text: str) -> bool:
-
     payload = str(text or "").strip()
     if not payload:
         return True
@@ -130,6 +129,15 @@ def _is_failure_prefix(text: str) -> bool:
         "Error ->",
         "Failed to ",
         "❌",
+        "🚫",
+        "Python script failed",
+        "Python code blocked",
+        "Python script timed out",
+        "Python execution crashed",
+        "Terminal execution crashed",
+        "Terminal command timed out",
+        "SSH command timed out",
+        "SSH execution crashed",
     )
     return head.startswith(failure_markers)
 
