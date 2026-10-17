@@ -696,7 +696,6 @@ class UnifiedVoiceAssistant:
             self.wake_time = 0
             self.first_speech_time = 0
             self.has_spoken = False
-            self.command_speech_metrics = deque(maxlen=180)
 
             self.mic_available = True
             logger.info("Microphone initialized successfully. Voice input ENABLED.")
@@ -1195,7 +1194,6 @@ class UnifiedVoiceAssistant:
                         self.first_speech_time = 0
                         self.last_speech_time = time.time()
                         self.has_spoken = False
-                        self.command_speech_metrics.clear()
                         self.is_awake = True
                         logger.info("👂 User command listening STARTED (max wait 4.0s, silence timeout 1.0s).")
                         update_stt_status("listening", "Listening...")
@@ -1209,23 +1207,6 @@ class UnifiedVoiceAssistant:
                             self.first_speech_time = current_time
                         self.last_speech_time = current_time
                         self.has_spoken = True
-                        try:
-                            cmd_samples = array.array("h")
-                            cmd_samples.frombytes(pcm_data)
-                            n_cmd = len(cmd_samples)
-                            if n_cmd > 0:
-                                sq_sum = 0.0
-                                zc = 0
-                                prev_s = cmd_samples[0]
-                                for s_val in cmd_samples:
-                                    f_val = float(s_val)
-                                    sq_sum += f_val * f_val
-                                    if (f_val >= 0.0 and prev_s < 0.0) or (f_val < 0.0 and prev_s >= 0.0):
-                                        zc += 1
-                                    prev_s = f_val
-                                self.command_speech_metrics.append((math.sqrt(sq_sum / n_cmd), zc / float(n_cmd)))
-                        except Exception:
-                            pass
 
                     if not self.has_spoken and (current_time - self.wake_time > self.MAX_WAIT_TIMEOUT):
                         logger.info("⏱️ No speech detected within 4.0s after wake word. Ending command capture.")
@@ -1302,32 +1283,6 @@ class UnifiedVoiceAssistant:
         interrupt.clear_interrupt()
 
         if full_command and full_command not in ignore_words and len(full_command) > 3:
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_engine
-                metrics = list(self.command_speech_metrics)
-                if metrics:
-                    rms_vals = [m[0] for m in metrics]
-                    zcr_vals = [m[1] for m in metrics]
-                    peak_rms = max(rms_vals)
-                    mean_rms = sum(rms_vals) / len(rms_vals)
-                    mean_zcr = sum(zcr_vals) / len(zcr_vals)
-                else:
-                    peak_rms = self._noise_floor_rms * 1.2
-                    mean_rms = self._noise_floor_rms
-                    mean_zcr = 0.08
-                speech_start = self.first_speech_time if self.first_speech_time > 0 else self.wake_time
-                spoken_dur = max(0.35, self.last_speech_time - speech_start)
-                word_cnt = len(full_command.split())
-                behavioral_engine.record_voice_telemetry(
-                    peak_rms=peak_rms,
-                    mean_rms=mean_rms,
-                    noise_floor=self._noise_floor_rms,
-                    mean_zcr=mean_zcr,
-                    duration_s=spoken_dur,
-                    word_count=word_cnt
-                )
-            except Exception as e:
-                logger.debug(f"Voice telemetry update skipped: {e}")
             logger.info(f"✅ Valid command accepted -> '{full_command}'")
             update_stt_status("understanding", full_command)
             self.command_queue.put(full_command)

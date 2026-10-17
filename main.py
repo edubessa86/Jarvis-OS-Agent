@@ -238,11 +238,11 @@ def shutdown_jarvis(reason="Shutdown signal received", exit_code=0):
         logger.error(f"Error saving LTM graph: {e}")
 
     try:
-        from core.brain.Memory.BehavioralEngine import behavioral_engine
-        behavioral_engine.save_state()
-        logger.info("Behavioral ML Engine state saved successfully.")
+        from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+        behavioral_pattern_engine.shutdown()
+        logger.info("Behavioral Pattern Engine state saved successfully.")
     except Exception as e:
-        logger.error(f"Error saving Behavioral ML Engine state: {e}")
+        logger.error(f"Error saving Behavioral Pattern Engine state: {e}")
 
     if _executor is not None:
         try:
@@ -429,13 +429,11 @@ def run_jarvis():
     threading.Thread(target=start_gui_warmup_background, daemon=True).start()
 
     try:
-        logger.info("Preloading Lifetime Memory Engine & Semantic Model safely...")
-        from core.brain.Memory.LifetimeMemory import ltm_engine
-        from core.brain.Memory.BehavioralEngine import behavioral_engine
-        behavioral_engine._ensure_anchors()
-        logger.info("Lifetime Memory Engine, Semantic Model & Behavioral ML Engine loaded successfully!")
+        from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+        behavioral_pattern_engine.shutdown()
+        logger.info("Behavioral Pattern Engine state saved successfully.")
     except Exception as e:
-        logger.error(f"Failed to preload LTM / Behavioral Engine: {e}")
+        logger.error(f"Error saving Behavioral Pattern Engine state: {e}")
 
     def start_rag_background():
         try:

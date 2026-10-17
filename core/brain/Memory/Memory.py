@@ -212,7 +212,7 @@ class ContextMemory:
             for k in ("ml_prediction", "predicted_mood", "recommended_emotion", "predicted_apps", "predicted_tools"):
                 self._ephemeral_expiry[k] = exp_ts
 
-    def get_ephemeral_context(self, mode: str = "agentic") -> str:
+    def get_ephemeral_context(self, mode: str = "agentic", current_command: str = "") -> str:
         with self._lock:
             self._prune_expired_ephemeral()
             self.sync_connected_devices()
@@ -229,6 +229,20 @@ class ContextMemory:
                     lines.append(f"Last generated image: {last_img}")
                 if last_shot:
                     lines.append(f"Last screenshot taken: {last_shot}")
+
+                try:
+                    from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+                    recent_ctx = self.get_fast_history_context()
+                    beh_block = behavioral_pattern_engine.format_ephemeral_block(
+                        current_command=current_command,
+                        mode="fast",
+                        recent_context=recent_ctx,
+                    )
+                    if beh_block:
+                        lines.append(beh_block)
+                except Exception as e:
+                    logger.error(f"Behavioral ephemeral inject error (fast): {e}")
+
                 if not lines:
                     return ""
                 return "[[RECENT AGENT ACTIVITY]]\n" + "\n".join(lines) + "\n"
@@ -241,22 +255,18 @@ class ContextMemory:
             if last_shot:
                 lines.append(f"[EPHEMERAL: Last screenshot taken = {last_shot}]")
 
-            ml_pred = self.ephemeral.get("ml_prediction")
-            if isinstance(ml_pred, dict) and ml_pred.get("mood"):
-                lines.append(
-                    f"[EPHEMERAL: ML Predicted Mood = {ml_pred.get('mood')} ({ml_pred.get('confidence', 0)}%) "
-                    f"| Emotion = {ml_pred.get('recommended_emotion', '[focused]')} "
-                    f"| Situation = {ml_pred.get('situation_key', '')}]"
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+                recent_ctx = self.get_fast_history_context()
+                beh_block = behavioral_pattern_engine.format_ephemeral_block(
+                    current_command=current_command,
+                    mode="agentic",
+                    recent_context=recent_ctx,
                 )
-                apps = ml_pred.get("likely_apps") or []
-                tools = ml_pred.get("preferred_tools") or []
-                if apps or tools:
-                    habit_parts = []
-                    if apps:
-                        habit_parts.append(f"Likely Apps = {', '.join(apps)}")
-                    if tools:
-                        habit_parts.append(f"Preferred Tools = {', '.join(tools)}")
-                    lines.append(f"[EPHEMERAL: ML Habit Signals -> {' | '.join(habit_parts)}]")
+                if beh_block:
+                    lines.append(beh_block)
+            except Exception as e:
+                logger.error(f"Behavioral ephemeral inject error (agentic): {e}")
 
             return "\n".join(lines)
 
@@ -265,11 +275,6 @@ class ContextMemory:
             clean_text = text.strip()
             with self._lock:
                 self.live_feedback_queue.append(clean_text)
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_engine
-                behavioral_engine.register_live_override(clean_text)
-            except Exception as e:
-                logger.debug(f"Behavioral live override hook error: {e}")
 
     def get_and_clear_feedback(self):
         with self._lock:
@@ -457,13 +462,6 @@ class ContextMemory:
                 return None
 
     def catchup_summaries(self):
-        if self.master_history:
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_engine
-                behavioral_engine.train_from_history(self.master_history, self.daily_summaries)
-            except Exception as e:
-                logger.error(f"Behavioral catchup training error: {e}")
-
         if not MEMORY_SUMMARY_CATCHUP_ON_STARTUP:
             return
         if not self.summary_client or not self.master_history:
@@ -505,6 +503,14 @@ class ContextMemory:
             thread.start()
         except Exception as e:
             logger.error(f"Thread starting error: {e}")
+
+    def _async_extract_behavioral_patterns(self, message):
+        try:
+            from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+            history = self.get_fast_history_context()
+            behavioral_pattern_engine.observe_user_message(message, history)
+        except Exception as e:
+            logger.error(f"Behavioral extraction trigger error: {e}")
 
     def _extract_permanent_facts_ai(self, message):
         if not self.ltm_client or len(message.split()) < 2:
@@ -758,6 +764,7 @@ Return STRICT JSON exactly in this schema:
             if role == "USER" and message.lower().strip() not in ignore_words:
                 self._track_session_state(message)
                 self._async_extract_permanent_facts(message)
+                self._async_extract_behavioral_patterns(message)
         except Exception as e:
             logger.error(f"Error adding message to memory: {e}")
 
@@ -880,16 +887,6 @@ Return STRICT JSON exactly in this schema:
                 f"Current Time: {datetime.now().strftime('%A, %Y-%m-%d %H:%M')}",
                 f"SESSION MODE: {self.current_mode}"
             ]
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_engine
-                ml_telemetry = behavioral_engine.predict_for_agent(query, self.master_history)
-                ml_payload = behavioral_engine.get_last_ephemeral_payload()
-                if ml_payload:
-                    self.set_ml_ephemeral(ml_payload, ttl_seconds=600)
-                if ml_telemetry:
-                    context.append(ml_telemetry)
-            except Exception as ml_err:
-                logger.error(f"Behavioral ML prediction error: {ml_err}")
             return "\n".join(context)
         except Exception as e:
             logger.error(f"Relevant context retrieval error: {e}")

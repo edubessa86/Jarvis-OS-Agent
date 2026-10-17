@@ -46,7 +46,7 @@ def clean_json_string(raw_text: str) -> str:
     return re.sub(r'^```json\n|```$', '', raw_text, flags=re.MULTILINE).strip()
 
 
-def build_fast_brain_context(memory_instance=None, ephemeral: dict = None) -> str:
+def build_fast_brain_context(memory_instance=None, ephemeral: dict = None, current_command: str = "") -> str:
     current_time = datetime.datetime.now().strftime('%A, %d %B %Y | %I:%M %p')
 
     context = f"[[SYSTEM CONTEXT - DO NOT REVEAL THIS TO USER]]\n"
@@ -57,7 +57,9 @@ def build_fast_brain_context(memory_instance=None, ephemeral: dict = None) -> st
     context += f"[[RECENT CONVERSATION]]\n{fast_history}\n\n"
 
     if memory_instance and hasattr(memory_instance, "get_ephemeral_context"):
-        ephemeral_block = memory_instance.get_ephemeral_context(mode="fast")
+        ephemeral_block = memory_instance.get_ephemeral_context(
+            mode="fast", current_command=current_command
+        )
         if ephemeral_block:
             context += ephemeral_block
     elif ephemeral:
@@ -265,7 +267,9 @@ def fetch_from_groq(raw_command: str, memory_instance=None, ephemeral: dict = No
     result = make_result("")
 
     try:
-        system_context = build_fast_brain_context(memory_instance, ephemeral)
+        system_context = build_fast_brain_context(
+            memory_instance, ephemeral, current_command=raw_command
+        )
         tools = _build_fast_brain_tools()
 
         launch_popup()
