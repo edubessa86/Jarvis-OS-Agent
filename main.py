@@ -237,6 +237,13 @@ def shutdown_jarvis(reason="Shutdown signal received", exit_code=0):
     except Exception as e:
         logger.error(f"Error saving LTM graph: {e}")
 
+    try:
+        from core.brain.Memory.BehavioralEngine import behavioral_engine
+        behavioral_engine.save_state()
+        logger.info("Behavioral ML Engine state saved successfully.")
+    except Exception as e:
+        logger.error(f"Error saving Behavioral ML Engine state: {e}")
+
     if _executor is not None:
         try:
             _executor.shutdown(wait=False, cancel_futures=True)
@@ -424,9 +431,11 @@ def run_jarvis():
     try:
         logger.info("Preloading Lifetime Memory Engine & Semantic Model safely...")
         from core.brain.Memory.LifetimeMemory import ltm_engine
-        logger.info("Lifetime Memory Engine & Semantic Model loaded successfully!")
+        from core.brain.Memory.BehavioralEngine import behavioral_engine
+        behavioral_engine._ensure_anchors()
+        logger.info("Lifetime Memory Engine, Semantic Model & Behavioral ML Engine loaded successfully!")
     except Exception as e:
-        logger.error(f"Failed to preload LTM Engine: {e}")
+        logger.error(f"Failed to preload LTM / Behavioral Engine: {e}")
 
     def start_rag_background():
         try:
@@ -454,6 +463,7 @@ def run_jarvis():
             def consume_pending_confirmation(self): return None
             def consume_silent_flag(self): return False
             def set_last_artifact(self, key, file_path, ttl_seconds=600): pass
+            def set_ml_ephemeral(self, ml_payload, ttl_seconds=600): pass
             def get_and_clear_feedback(self): return ""
             def add_live_feedback(self, cmd): pass
             def catchup_summaries(self): pass

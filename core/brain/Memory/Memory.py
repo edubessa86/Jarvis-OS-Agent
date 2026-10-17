@@ -199,6 +199,19 @@ class ContextMemory:
             except Exception as e:
                 logger.warning(f"Failed to sync connected devices: {e}")
 
+    def set_ml_ephemeral(self, ml_payload: dict, ttl_seconds: int = 600):
+        if not isinstance(ml_payload, dict) or not ml_payload:
+            return
+        with self._lock:
+            exp_ts = time.time() + ttl_seconds
+            self.ephemeral["ml_prediction"] = dict(ml_payload)
+            self.ephemeral["predicted_mood"] = ml_payload.get("mood", "")
+            self.ephemeral["recommended_emotion"] = ml_payload.get("recommended_emotion", "")
+            self.ephemeral["predicted_apps"] = list(ml_payload.get("likely_apps", []))
+            self.ephemeral["predicted_tools"] = list(ml_payload.get("preferred_tools", []))
+            for k in ("ml_prediction", "predicted_mood", "recommended_emotion", "predicted_apps", "predicted_tools"):
+                self._ephemeral_expiry[k] = exp_ts
+
     def get_ephemeral_context(self, mode: str = "agentic") -> str:
         with self._lock:
             self._prune_expired_ephemeral()
@@ -227,12 +240,36 @@ class ContextMemory:
                 lines.append(f"[EPHEMERAL: Last generated image = {last_img}]")
             if last_shot:
                 lines.append(f"[EPHEMERAL: Last screenshot taken = {last_shot}]")
+
+            ml_pred = self.ephemeral.get("ml_prediction")
+            if isinstance(ml_pred, dict) and ml_pred.get("mood"):
+                lines.append(
+                    f"[EPHEMERAL: ML Predicted Mood = {ml_pred.get('mood')} ({ml_pred.get('confidence', 0)}%) "
+                    f"| Emotion = {ml_pred.get('recommended_emotion', '[focused]')} "
+                    f"| Situation = {ml_pred.get('situation_key', '')}]"
+                )
+                apps = ml_pred.get("likely_apps") or []
+                tools = ml_pred.get("preferred_tools") or []
+                if apps or tools:
+                    habit_parts = []
+                    if apps:
+                        habit_parts.append(f"Likely Apps = {', '.join(apps)}")
+                    if tools:
+                        habit_parts.append(f"Preferred Tools = {', '.join(tools)}")
+                    lines.append(f"[EPHEMERAL: ML Habit Signals -> {' | '.join(habit_parts)}]")
+
             return "\n".join(lines)
 
     def add_live_feedback(self, text):
         if text and text.strip():
+            clean_text = text.strip()
             with self._lock:
-                self.live_feedback_queue.append(text.strip())
+                self.live_feedback_queue.append(clean_text)
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_engine
+                behavioral_engine.register_live_override(clean_text)
+            except Exception as e:
+                logger.debug(f"Behavioral live override hook error: {e}")
 
     def get_and_clear_feedback(self):
         with self._lock:
@@ -420,6 +457,13 @@ class ContextMemory:
                 return None
 
     def catchup_summaries(self):
+        if self.master_history:
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_engine
+                behavioral_engine.train_from_history(self.master_history, self.daily_summaries)
+            except Exception as e:
+                logger.error(f"Behavioral catchup training error: {e}")
+
         if not MEMORY_SUMMARY_CATCHUP_ON_STARTUP:
             return
         if not self.summary_client or not self.master_history:
@@ -664,7 +708,7 @@ Return STRICT JSON exactly in this schema:
             if (datetime.now() - self.mode_timer).total_seconds() / 60 > 30:
                 self.current_mode = "General Assistant"
             msg_lower = message.lower()
-            if any(w in msg_lower for w in ["code", "python", "error", "bug"]):
+            if any(w in msg_lower for w in ["code", "python", "error", "bug", "script", "terminal", "git"]):
                 self.current_mode = "Technical"
                 self.mode_timer = datetime.now()
             elif any(w in msg_lower for w in ["joke", "song", "play", "movie"]):
@@ -836,6 +880,16 @@ Return STRICT JSON exactly in this schema:
                 f"Current Time: {datetime.now().strftime('%A, %Y-%m-%d %H:%M')}",
                 f"SESSION MODE: {self.current_mode}"
             ]
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_engine
+                ml_telemetry = behavioral_engine.predict_for_agent(query, self.master_history)
+                ml_payload = behavioral_engine.get_last_ephemeral_payload()
+                if ml_payload:
+                    self.set_ml_ephemeral(ml_payload, ttl_seconds=600)
+                if ml_telemetry:
+                    context.append(ml_telemetry)
+            except Exception as ml_err:
+                logger.error(f"Behavioral ML prediction error: {ml_err}")
             return "\n".join(context)
         except Exception as e:
             logger.error(f"Relevant context retrieval error: {e}")

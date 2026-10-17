@@ -31,7 +31,8 @@ class LifetimeMemoryEngine:
     def _compute_all_embeddings(self):
         nodes = list(self.graph.nodes())
         if nodes:
-            embeddings = self.embedder.encode(nodes)
+            with self._embed_lock:
+                embeddings = self.embedder.encode(nodes, show_progress_bar=False)
             for node, emb in zip(nodes, embeddings):
                 self.node_embeddings[node] = emb
 
@@ -45,12 +46,15 @@ class LifetimeMemoryEngine:
                 unique_relations.add(data['relation'].upper())
         
         if unique_relations:
-            rel_embeddings = self.embedder.encode(list(unique_relations))
-            for rel, emb in zip(unique_relations, rel_embeddings):
+            rel_list = list(unique_relations)
+            with self._embed_lock:
+                rel_embeddings = self.embedder.encode(rel_list, show_progress_bar=False)
+            for rel, emb in zip(rel_list, rel_embeddings):
                 self.relation_embeddings[rel] = emb
 
     def _get_embedding(self, text):
-        return self.embedder.encode([text])[0]
+        with self._embed_lock:
+            return self.embedder.encode([text], show_progress_bar=False)[0]
 
     def embed(self, texts, is_query=False):
         if texts is None:
@@ -349,5 +353,41 @@ class LifetimeMemoryEngine:
 
         res_str = "\n".join(unique[:20])
         return f"Observation: Found relations in Graph Memory:\n{res_str}"
+
+    def get_behavioral_graph_signals(self, query_text, top_k=4, query_emb=None):
+        if not query_text or not str(query_text).strip():
+            return []
+        with self._lock:
+            if not self.node_embeddings:
+                return []
+            if query_emb is not None and len(query_emb) == 384:
+                q_emb = np.array(query_emb, dtype=np.float32)
+            else:
+                q_emb = self._get_embedding(str(query_text).strip())
+            scored_edges = []
+            for u, v, data in self.graph.edges(data=True):
+                if data.get("archived", False):
+                    continue
+                u_emb = self.node_embeddings.get(u)
+                v_emb = self.node_embeddings.get(v)
+                sim_u = (1.0 - cosine(q_emb, u_emb)) if u_emb is not None else 0.0
+                sim_v = (1.0 - cosine(q_emb, v_emb)) if v_emb is not None else 0.0
+                max_sim = max(sim_u, sim_v)
+                weight = float(data.get("weight", 1) or 1)
+                count = int(data.get("count", 1) or 1)
+                if max_sim >= 0.68 or (u.lower() == "user" and weight >= 2.0 and max_sim >= 0.55):
+                    rel = data.get("relation", "RELATES_TO")
+                    score = max_sim * (1.0 + 0.25 * min(weight, 8.0) + 0.15 * min(count, 8))
+                    scored_edges.append((score, f"[{u}] --({rel})--> [{v}] (seen={count}x)"))
+            scored_edges.sort(key=lambda x: x[0], reverse=True)
+            seen = set()
+            out = []
+            for _, text_val in scored_edges:
+                if text_val not in seen:
+                    seen.add(text_val)
+                    out.append(text_val)
+                if len(out) >= top_k:
+                    break
+            return out
 
 ltm_engine = LifetimeMemoryEngine()

@@ -223,6 +223,11 @@ User Command: "{raw_command}"
         "files_touched": [],
         "system_events": [],
     }
+    all_executed_tools = []
+    had_system_failure = False
+    had_live_override = False
+    had_user_cancel = False
+    had_major_edit = False
 
     if memory_instance and not hasattr(memory_instance, "ephemeral"):
         memory_instance.ephemeral = {}
@@ -234,6 +239,19 @@ User Command: "{raw_command}"
         elapsed = time.time() - start_time
         if elapsed > timeout_seconds:
             logger.warning(f"⏰ Agent loop timeout after {elapsed:.1f} seconds")
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_engine
+                behavioral_engine.learn_from_execution(
+                    raw_command=raw_command,
+                    metadata_tracker=metadata_tracker,
+                    executed_tools=all_executed_tools,
+                    had_system_failure=True,
+                    had_live_override=had_live_override,
+                    had_user_cancel=had_user_cancel,
+                    had_major_edit=had_major_edit
+                )
+            except Exception as learn_err:
+                logger.error(f"Behavioral learning update failed on timeout: {learn_err}")
             if not silent:
                 update_agent_status(
                     step=0,
@@ -280,6 +298,7 @@ User Command: "{raw_command}"
             live_feedback = memory_instance.get_and_clear_feedback()
 
         if live_feedback:
+            had_live_override = True
             logger.warning(f"🚨 User injected live feedback: {live_feedback}")
             override_block = (
                 f"[⚡ LIVE OVERRIDES]\n🛑 CRITICAL USER UPDATE: {live_feedback}"
@@ -639,6 +658,20 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                 logger.info("✅ Agent declared task complete!")
                 final_text = ai_response.pop("response", "Task completed sir.")
 
+                try:
+                    from core.brain.Memory.BehavioralEngine import behavioral_engine
+                    behavioral_engine.learn_from_execution(
+                        raw_command=raw_command,
+                        metadata_tracker=metadata_tracker,
+                        executed_tools=all_executed_tools,
+                        had_system_failure=had_system_failure,
+                        had_live_override=had_live_override,
+                        had_user_cancel=had_user_cancel,
+                        had_major_edit=had_major_edit
+                    )
+                except Exception as learn_err:
+                    logger.error(f"Behavioral learning update failed: {learn_err}")
+
                 if not silent:
                     update_agent_status(
                         step=0,
@@ -725,7 +758,18 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                             obs_text = str(observation)
                             is_user_cancelled = "[USER_CANCELLED]" in obs_text
                             is_user_edited = "[NOTE: User explicitly edited" in obs_text
+                            if is_user_cancelled:
+                                had_user_cancel = True
+                            if is_user_edited:
+                                try:
+                                    from core.brain.Memory.BehavioralEngine import behavioral_engine
+                                    if behavioral_engine.was_last_edit_significant():
+                                        had_major_edit = True
+                                except Exception:
+                                    pass
                             for t_key in executed_tools:
+                                if t_key not in all_executed_tools:
+                                    all_executed_tools.append(t_key)
                                 t_val = ai_response.get(t_key, {})
                                 if not isinstance(t_val, dict):
                                     t_val = {}
@@ -831,6 +875,7 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                 send_telegram_update(observation=clean_ui_obs)
                             break
                         else:
+                            had_system_failure = True
                             obs_str = str(observation).strip()
                             obs_preview = obs_str.replace("\n", " ")[:200]
                             logger.warning(
@@ -844,11 +889,13 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                         )
                         time.sleep(2)
                 except Exception as tool_err:
+                    had_system_failure = True
                     observation = (
                         f"Observation: Tool execution error - {tool_err}"
                     )
                     break
             else:
+                had_system_failure = True
                 action_fingerprint = f"{action_key}:{str(ai_response.get(action_key, ''))[:100]}"
                 completed_actions.add(
                     f"{action_fingerprint} -> [FAILED: After {retry_limit} retries]"
@@ -875,6 +922,7 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
             time.sleep(1.0)
 
         except Exception as e:
+            had_system_failure = True
             error_msg = str(e)
             if (
                 "429" in error_msg
@@ -882,6 +930,19 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                 or "quota" in error_msg.lower()
             ):
                 logger.error("❌ All providers exhausted or rate limited!")
+                try:
+                    from core.brain.Memory.BehavioralEngine import behavioral_engine
+                    behavioral_engine.learn_from_execution(
+                        raw_command=raw_command,
+                        metadata_tracker=metadata_tracker,
+                        executed_tools=all_executed_tools,
+                        had_system_failure=True,
+                        had_live_override=had_live_override,
+                        had_user_cancel=had_user_cancel,
+                        had_major_edit=had_major_edit
+                    )
+                except Exception as learn_err:
+                    logger.error(f"Behavioral learning update failed on quota error: {learn_err}")
                 if not silent:
                     update_agent_status(
                         step=0,
@@ -914,6 +975,20 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
 </Step>
 """
             step += 1
+
+    try:
+        from core.brain.Memory.BehavioralEngine import behavioral_engine
+        behavioral_engine.learn_from_execution(
+            raw_command=raw_command,
+            metadata_tracker=metadata_tracker,
+            executed_tools=all_executed_tools,
+            had_system_failure=True,
+            had_live_override=had_live_override,
+            had_user_cancel=had_user_cancel,
+            had_major_edit=had_major_edit
+        )
+    except Exception as learn_err:
+        logger.error(f"Behavioral learning update failed on max steps: {learn_err}")
 
     if not silent:
         update_agent_status(

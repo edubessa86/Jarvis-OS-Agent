@@ -2,7 +2,7 @@
 
 > **An AI Operating System that autonomously controls your PC, Android phone, local files, and lifelong memory — not just your code.**
 
-> **Open-Source · Live Mid-Execution Correction · Inline Comms Preview & Edit · Line-Drift-Free Editing · Lifelong Episodic Memory · Dual-Engine Voice · Proactive HITL · Android Termux SSH · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
+> **Open-Source · Online Behavioral ML & Mood Engine · Live Mid-Execution Correction · Inline Comms Preview & Edit · Line-Drift-Free Editing · Lifelong Episodic Memory · Dual-Engine Voice · Proactive HITL · Android Termux Bridge · Telegram Remote Control · Hybrid RAG · PC System Monitoring**
 
 [![Python Version](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-18.x-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
@@ -337,8 +337,9 @@ If you want an AI that finishes what it starts, on the machine you actually work
 | 🛡️ | **Line-Drift-Free Code Editing** | Uses exact `replace_block` search-and-replace instead of line numbers. Syntax errors are caught via AST lint and auto-corrected without human intervention. |
 | 🧠 | **Lifelong Episodic LTM & Hybrid RAG** | Vector-backed property graph with bidirectional edges, confidence scores, and temporal decay. Workspace documents are indexed with smart chunk overlap and retrieved via **Hybrid search (BM25 + Vector + RRF)** with recency boost. |
 | 📊 | **Web Knowledge Indexer Dashboard** | Local Flask dashboard at `127.0.0.1:8080` for managing indexed folders and filters. Auto-indexes `Documents` by default, user can add any folder via UI, with smart filters (system paths blocked, sensitive paths warned, garbage excluded), live progress, pause/resume, and per-folder stats. |
+| 🧬 | **Online Behavioral ML & Mood Adaptation** | Local 392-dim multimodal neural + prototype ensemble combining `bge-small` embeddings, acoustic voice DSP (`RMS SNR`, `ZCR`, speech rate), and temporal habits (`time_bucket::task_cluster` with multi-day support and exponential decay). Learns online from live overrides, UI message edits, and execution outcomes with zero cloud API cost. |
 | 🗜️ | **Compressed 15-Day Memory & Execution Logs** | Two-tier short-term memory: recent 2 days verbatim raw messages enriched with `<System_Execution_Log>` metadata (`apps_opened`, `apps_closed`, `files_touched`, `system_events`) + older days compressed into LLM-generated daily summaries. |
-| ⚡ | **Thread-Safe Ephemeral State (TTL Artifacts)** | Tracks live connected phones (`mtime`-cached), 10-minute TTL transient artifacts (`last_screenshot`, `last_generated_image`) for seamless FastBrain-to-AgenticBrain handoff, and 90-second auto-expiring HITL confirmation payloads. |
+| ⚡ | **Thread-Safe Ephemeral State (TTL + ML Signals)** | Tracks live connected phones (`mtime`-cached), 10-minute TTL transient artifacts (`last_screenshot`, `last_generated_image`), 10-minute TTL Behavioral ML predictions (`predicted_mood`, `recommended_emotion`, `likely_apps`, `preferred_tools`), and 90-second auto-expiring HITL confirmation payloads. |
 | 🔄 | **Hybrid Semantic AI Routing** | Semantic router decides FastBrain vs AgenticBrain per command, with instant proactive confirmation interception and a local rule-based fallback router. |
 | 📱 | **Android Termux & WebSocket Bridge** | Native control of Android devices and bidirectional batch file transfers over a persistent local WiFi/WebSocket bridge (`127.0.0.1:8090`) using Termux API and Android Intents — no SSH required. |
 | 🌍 | **Telegram Remote PC Control** | Trigger silent background PC commands from anywhere via a secure Telegram bot, without disturbing your active desktop session. |
@@ -476,10 +477,11 @@ flowchart TD
 
     subgraph Memory["🧠 Memory Ecosystem"]
         LTM[("🗄️ Vector Semantic Graph LTM<br/>Weighted Graph + Subgraph + Decay")]
+        ML[("🧬 Behavioral ML & Mood Engine<br/>392-Dim Neural + Voice DSP + Situational Habits")]
         RAG[("📚 ChromaDB Knowledge Index<br/>Documents + Custom Folders<br/>Hybrid Vector + BM25 + RRF")]
         Indexer["📊 Web Indexer Dashboard<br/>Flask @ 127.0.0.1:8080<br/>Folder + Filter Management"]
         JSONL["📜 Rolling History + Execution Logs<br/>2-Day Raw (Files/Apps/Events) + 13-Day Summaries"]
-        Ephemeral["⚡ Thread-Safe Ephemeral State<br/>10m TTL Artifacts + Device Cache + 90s HITL State"]
+        Ephemeral["⚡ Thread-Safe Ephemeral State<br/>10m TTL Artifacts & ML Signals + Device Cache + 90s HITL"]
     end
 
     Indexer -.->|Config + Filters| RAG
@@ -588,9 +590,13 @@ Jarvis implements a **four-tier** zero-duplication memory architecture:
    - **Auto-Migration:** Detects embedding-model changes via per-chunk metadata and auto-purges the index for a clean rebuild — no manual cleanup needed on upgrades.
    - **Web Dashboard:** Local Flask UI at `127.0.0.1:8080` with live progress, folder management (add/remove/reindex), filter editor, and pause/resume controls.
 4. **⚡ Thread-Safe Ephemeral Runtime Memory (Live State & Handoff):**
-   - **10-Minute TTL Artifacts:** Stores transient unspoken system artifacts (`last_screenshot`, `last_generated_image`) with automatic TTL pruning so a screenshot taken via FastBrain is immediately accessible to AgenticBrain on the next turn.
+   - **10-Minute TTL Artifacts & ML Signals:** Stores transient unspoken system artifacts (`last_screenshot`, `last_generated_image`) alongside live Behavioral ML predictions (`ml_prediction`, `predicted_mood`, `recommended_emotion`, `predicted_apps`, `predicted_tools`) with automatic 600s TTL pruning.
    - **`mtime`-Cached Hardware State:** Tracks live connected Android phones (`connected_devices.json`) using file modification timestamps for zero-overhead per-step reads.
    - **90-Second Proactive HITL State Machine:** Manages `waiting_for_confirmation`, `pending_task_data`, and atomic `force_silent_agentic` flags via background timers so affirmative user replies seamlessly inject the original proactive event payload into AgenticBrain.
+5. **🧬 Online Behavioral ML & Multimodal Mood Engine:**
+   - **392-Dim Hybrid Classifier:** Combines 384-dim `BAAI/bge-small-en-v1.5` embeddings with 8 contextual/acoustic features (`time_sin`, `time_cos`, `is_late_night`, live override frequency, failure rate, query length, vocal arousal, and vocal stress) to predict user mood (`DEEP_FOCUS`, `FRUSTRATED_URGENT`, `CASUAL_CHILL`, `TIRED_LOW_ENERGY`) in `<2ms`.
+   - **Situational Habit Learning:** Tracks `time_bucket::task_cluster` habits with multi-day verification (`distinct_days >= 2`) and exponential time decay (`exp(-0.04 * days)`), reinforced by LTM graph links.
+   - **Implicit HITL Reinforcement:** Continuously adapts verbosity, email/chat tone, and neural weights from live user overrides, inline UI draft edits (`SequenceMatcher` diffing), cancellations, and execution outcomes.
 
 ---
 
