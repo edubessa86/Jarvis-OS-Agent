@@ -430,10 +430,8 @@ def run_jarvis():
 
     try:
         from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
-        behavioral_pattern_engine.shutdown()
-        logger.info("Behavioral Pattern Engine state saved successfully.")
     except Exception as e:
-        logger.error(f"Error saving Behavioral Pattern Engine state: {e}")
+        logger.error(f"Error initializing Behavioral Pattern Engine: {e}")
 
     def start_rag_background():
         try:

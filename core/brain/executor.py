@@ -559,12 +559,6 @@ def handle_email_action(email_action: dict) -> str:
     body_edited = new_body_norm != orig_body_norm
 
     edit_note = ""
-    if subject_edited or body_edited:
-        try:
-            from core.brain.Memory.BehavioralEngine import behavioral_engine
-            behavioral_engine.record_ui_edit("email", orig_body_norm, new_body_norm, subject_edited=subject_edited)
-        except Exception:
-            pass
     if subject_edited and body_edited:
         edit_note = f" [NOTE: User explicitly edited the subject from UI to: '{subject}' and the body from UI to: '{body}']"
     elif body_edited:
@@ -619,11 +613,6 @@ def handle_whatsapp_action(whatsapp_action: dict) -> str:
 
     edit_note = ""
     if new_body_norm != orig_body_norm:
-        try:
-            from core.brain.Memory.BehavioralEngine import behavioral_engine
-            behavioral_engine.record_ui_edit("whatsapp", orig_body_norm, new_body_norm)
-        except Exception:
-            pass
         edit_note = f" [NOTE: User explicitly edited the body from UI to: '{msg_body}']"
 
     logger.info(f"🤖 Agent Sending WhatsApp to: {to_name}")
@@ -672,11 +661,6 @@ def handle_telegram_action(telegram_action: dict) -> str:
 
     edit_note = ""
     if new_body_norm != orig_body_norm:
-        try:
-            from core.brain.Memory.BehavioralEngine import behavioral_engine
-            behavioral_engine.record_ui_edit("whatsapp", orig_body_norm, new_body_norm)
-        except Exception:
-            pass
         edit_note = f" [NOTE: User explicitly edited the body from UI to: '{msg_body}']"
 
     logger.info(f"🤖 Agent Sending Telegram to: {to_name}")

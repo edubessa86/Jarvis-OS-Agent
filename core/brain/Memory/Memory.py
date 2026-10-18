@@ -23,10 +23,28 @@ from core.brain.config import (
 
 
 class ContextMemory:
+    _COMMAND_PREFIXES = (
+        "open ", "close ", "play ", "kholo", "band ", "send ", "bhej",
+        "write ", "run ", "execute ", "search ", "find ", "check ",
+        "screenshot", "lock ", "sleep ", "volume", "brightness",
+        "email ", "whatsapp ", "telegram ", "message ",
+    )
+
+    _MEMORY_SIGNAL_PATTERNS = [
+        r"\b(mai|main|mein|hum|mujhe|mera|meri|mere|i|my|me)\b",
+        r"\b(raat|subah|shaam|dopahar|morning|evening|night|afternoon|late\s*night)\b",
+        r"\b\d{1,2}\s*(?:bje|bajey|baj|o'?clock|pm|am)\b",
+        r"\b(roz|rozana|hamesha|aksar|usually|always|mostly|daily|every\s*day|every\s*morning|every\s*night|never|kabhi\s*nahi|kabhi\s*mat)\b",
+        r"\b(pasand|prefer|like|love|hate|dislike|chahiye|routine|habit|aadat|schedule|tone|style)\b",
+        r"\b(yaad\s*rakhna|remember\s*that|from\s*now\s*on|aage\s*se)\b",
+        r"\b(naam|name|bhai|behen|dost|father|mother|sister|brother|boss|friend|rehta|live|study|college|number|email|phone|project)\b",
+    ]
+
     def __init__(self, memory_path="Data/jarvis_memory"):
         self.memory_path = Path(memory_path)
         self.memory_path.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._extract_lock = threading.Lock()
         self.master_history_file = self.memory_path / "master_chat_history.jsonl"
         self.daily_summaries_file = self.memory_path / "daily_summaries.jsonl"
         old_json_file = self.memory_path / "master_chat_history.json"
@@ -72,10 +90,29 @@ class ContextMemory:
 
         self._start_background_pruning()
 
+    def _should_run_hybrid_extraction(self, message: str) -> bool:
+        if not message or not message.strip():
+            return False
+        low = message.lower().strip()
+        words = low.split()
+        if len(words) < 3:
+            return False
+        if low.endswith("?") and not any(re.search(p, low) for p in self._MEMORY_SIGNAL_PATTERNS[:1]):
+            return False
+        has_signal = any(re.search(p, low) for p in self._MEMORY_SIGNAL_PATTERNS)
+        if any(low.startswith(prefix) for prefix in self._COMMAND_PREFIXES):
+            strong_override = re.search(
+                r"\b(hamesha|always|never|kabhi\s*nahi|kabhi\s*mat|yaad\s*rakhna|remember|from\s*now\s*on|aage\s*se|pasand|prefer|routine|aadat|roz|daily)\b",
+                low
+            )
+            return bool(strong_override)
+        return has_signal
+
     def _is_valid_triplet(self, src, rel, tgt):
         invalid_entities = {
             "agent", "info", "system", "jarvis", "data", "unknown",
-            "yes", "no", "today", "tomorrow", "now", "thing", "stuff"
+            "yes", "no", "today", "tomorrow", "now", "thing", "stuff",
+            "morning", "evening", "night", "afternoon", "subah", "raat", "shaam"
         }
         if src.lower() in invalid_entities or tgt.lower() in invalid_entities:
             return False
@@ -92,12 +129,14 @@ class ContextMemory:
             if len(src.split()) > 3 or len(tgt.split()) > 3:
                 return False
 
-        ephemeral_relations = {
+        ephemeral_or_behavioral_relations = {
             "is_doing", "eating", "going", "will_give", "must_remember",
             "status_update", "remember", "searching", "asking", "said",
-            "talking_to", "wants_to", "planning_to"
+            "talking_to", "wants_to", "planning_to", "habit", "has_habit",
+            "routine", "has_routine", "daily_routine", "prefers_time",
+            "works_at_time", "coding_time", "schedule"
         }
-        if rel.lower() in ephemeral_relations:
+        if rel.lower() in ephemeral_or_behavioral_relations:
             return False
         return True
 
@@ -221,6 +260,16 @@ class ContextMemory:
             last_img = self.ephemeral.get("last_generated_image")
             last_shot = self.ephemeral.get("last_screenshot")
 
+            beh_block = ""
+            try:
+                from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+                beh_block = behavioral_pattern_engine.format_ephemeral_block(
+                    current_command=current_command,
+                    mode=mode,
+                )
+            except Exception as e:
+                logger.error(f"Behavioral ephemeral inject error ({mode}): {e}")
+
             if mode == "fast":
                 lines = []
                 if devices:
@@ -230,22 +279,12 @@ class ContextMemory:
                 if last_shot:
                     lines.append(f"Last screenshot taken: {last_shot}")
 
-                try:
-                    from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
-                    recent_ctx = self.get_fast_history_context()
-                    beh_block = behavioral_pattern_engine.format_ephemeral_block(
-                        current_command=current_command,
-                        mode="fast",
-                        recent_context=recent_ctx,
-                    )
-                    if beh_block:
-                        lines.append(beh_block)
-                except Exception as e:
-                    logger.error(f"Behavioral ephemeral inject error (fast): {e}")
-
-                if not lines:
-                    return ""
-                return "[[RECENT AGENT ACTIVITY]]\n" + "\n".join(lines) + "\n"
+                out_blocks = []
+                if lines:
+                    out_blocks.append("[[RECENT AGENT ACTIVITY]]\n" + "\n".join(lines))
+                if beh_block:
+                    out_blocks.append(beh_block)
+                return ("\n\n".join(out_blocks) + "\n") if out_blocks else ""
 
             lines = []
             if devices:
@@ -254,19 +293,8 @@ class ContextMemory:
                 lines.append(f"[EPHEMERAL: Last generated image = {last_img}]")
             if last_shot:
                 lines.append(f"[EPHEMERAL: Last screenshot taken = {last_shot}]")
-
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
-                recent_ctx = self.get_fast_history_context()
-                beh_block = behavioral_pattern_engine.format_ephemeral_block(
-                    current_command=current_command,
-                    mode="agentic",
-                    recent_context=recent_ctx,
-                )
-                if beh_block:
-                    lines.append(beh_block)
-            except Exception as e:
-                logger.error(f"Behavioral ephemeral inject error (agentic): {e}")
+            if beh_block:
+                lines.append(beh_block)
 
             return "\n".join(lines)
 
@@ -496,146 +524,194 @@ class ContextMemory:
         except Exception as e:
             logger.error(f"Catchup summaries error: {e}")
 
-    def _async_extract_permanent_facts(self, message):
+    def _async_extract_hybrid_memory(self, message):
+        if not self._should_run_hybrid_extraction(message):
+            logger.debug(f"🧠 Hybrid memory prefilter: SKIP | msg='{message[:60]}'")
+            return
         try:
-            thread = threading.Thread(target=self._extract_permanent_facts_ai, args=(message,))
+            thread = threading.Thread(target=self._extract_hybrid_memory_ai, args=(message,))
             thread.daemon = True
             thread.start()
         except Exception as e:
-            logger.error(f"Thread starting error: {e}")
+            logger.error(f"Hybrid memory thread starting error: {e}")
 
-    def _async_extract_behavioral_patterns(self, message):
-        try:
-            from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
-            history = self.get_fast_history_context()
-            behavioral_pattern_engine.observe_user_message(message, history)
-        except Exception as e:
-            logger.error(f"Behavioral extraction trigger error: {e}")
-
-    def _extract_permanent_facts_ai(self, message):
-        if not self.ltm_client or len(message.split()) < 2:
+    def _extract_hybrid_memory_ai(self, message):
+        if not self.ltm_client:
             return
 
-        recent_history = ""
-        if self.master_history:
-            recent_history = "\n".join([
-                f"{msg.get('role', '')}: {msg.get('message', '')}"
-                for msg in self.master_history[-6:]
-            ])
+        with self._extract_lock:
+            recent_history = ""
+            if self.master_history:
+                recent_history = "\n".join([
+                    f"{msg.get('role', '')}: {msg.get('message', '')}"
+                    for msg in self.master_history[-6:]
+                ])
 
-        existing_nodes_str = "None"
-        existing_relations_str = "None"
-        try:
-            from core.brain.Memory.LifetimeMemory import ltm_engine
-            top_nodes = ltm_engine.get_all_node_names(limit=100)
-            if top_nodes:
-                existing_nodes_str = ", ".join(top_nodes)
+            existing_nodes_str = "None"
+            existing_relations_str = "None"
+            try:
+                from core.brain.Memory.LifetimeMemory import ltm_engine
+                top_nodes = ltm_engine.get_all_node_names(limit=100)
+                if top_nodes:
+                    existing_nodes_str = ", ".join(top_nodes)
 
-            top_relations = ltm_engine.get_all_relations(limit=50)
-            if top_relations:
-                existing_relations_str = ", ".join(top_relations)
-        except Exception as e:
-            logger.error(f"Failed to fetch LTM nodes or relations: {e}")
+                top_relations = ltm_engine.get_all_relations(limit=50)
+                if top_relations:
+                    existing_relations_str = ", ".join(top_relations)
+            except Exception as e:
+                logger.error(f"Failed to fetch LTM nodes or relations: {e}")
 
-        prompt = f"""You are the core LTM (Lifetime Memory) Engine for Jarvis.
-Your job is to analyze the user's latest message using the context of the recent conversation, and extract ONLY permanent, long-lasting factual knowledge into a Graph structure.
+            prompt = f"""You are the Unified Hybrid Memory Extractor for Jarvis (an AI assistant).
+Analyze the user's latest message using the recent conversation context and classify durable knowledge into TWO STRICTLY SEPARATE memory systems based on HOW Jarvis will retrieve and use it in the future:
 
-[CRITICAL GUARDRAILS]:
-1. ZERO-HALLUCINATION: If the message does not contain a CLEAR, UNDENIABLE permanent fact, you MUST return "is_permanent_fact": false. Do not guess, infer, or force a relation.
-2. THE 1-YEAR TEST: Will this fact likely still be true or relevant 1 years from now? If 'No' (e.g., current mood, current task, upcoming trip), IGNORE it entirely and return false.
+======================================================================
+SYSTEM 1: LTM GRAPH TRIPLETS (`ltm_triplets`) — Active "Pull" Lookup
+======================================================================
+Jarvis only searches the LTM Graph when explicitly asked a "Who / What / Where / Which" question via the `memory_actions` tool.
+EXTRACT INTO `ltm_triplets` ONLY IF IT IS A STATIC ENTITY FACT:
+- Identity & Demographics (Name, Age, City, College, Degree, Profession).
+- Relationships (Family, Friends, Boss, Colleagues — e.g., "Rahul mera bhai hai").
+- Contact Info (Phone numbers, Emails, Addresses — use HAS_PHONE, HAS_EMAIL, LIVES_IN).
+- Owned Assets & Hardware Specs (Laptop model, RAM, Phone model, Vehicles).
+- Named Projects & Creations (e.g., "Mai GhostVault project bana raha hu" -> `[User] --(DEVELOPS)--> [GhostVault]`).
+- Pure Static Noun Favorites with NO time/workflow/situational context (e.g., "Mera favorite food Biryani hai").
 
-[WHAT TO SAVE]:
-- Identity & Traits (Profession, Age, Habits, Skills).
-- Relationships (Friends, Family, Colleagues).
-- Hard Preferences (Likes, Dislikes, Allergies, Favorite things).
-- Assets (Car owned, Phone model, Pets).
-- Contact Information (Phone numbers, Emails, Addresses).
+NEVER PUT IN `ltm_triplets`:
+- Time-based preferences, coding hours, daily routines, sleep/wake times, work habits, or communication style preferences.
 
-[EXISTING GRAPH RELATIONS]:
+======================================================================
+SYSTEM 2: BEHAVIORAL PATTERNS (`behavioral_patterns`) — Passive "Push" Auto-RAG
+======================================================================
+Behavioral patterns are automatically injected into Jarvis's prompt via semantic similarity whenever the user asks Jarvis to plan, schedule, code, design, draft messages, or suggest workflows.
+EXTRACT INTO `behavioral_patterns` ONLY IF IT GUIDES HOW/WHEN JARVIS SHOULD PERSONALIZE TASKS:
+- Time & Energy Routines: When the user likes to code, study, work, wake up, or rest (e.g., "mujhe subah coding krna pasand hai", "raat 8 bje Jarvis pe kaam karta hu").
+- Frequency Habits: What the user does daily/regularly (e.g., "har subah walk pe jata hu").
+- Workflow, Coding & UI Preferences: Preferred tech stack, IDE, UI style, theme, or coding habits that Jarvis should silently apply when building things (e.g., "mujhe dark mode glassmorphism pasand hai", "code me comments mat daalna").
+- Communication & Tone Preferences: How the user wants emails, messages, or AI replies formatted (e.g., "email me formal tone nahi chahiye, short rakho").
+- Situational Dislikes/Constraints: Things to avoid when scheduling or executing tasks (e.g., "subah meetings mat rakhna").
+
+======================================================================
+CRITICAL MUTUAL EXCLUSION & DYNAMIC SPLIT RULES
+======================================================================
+1. ZERO DUPLICATION: The exact same piece of information MUST NEVER be placed in both `ltm_triplets` and `behavioral_patterns`.
+2. ACTIVITY + TIME/PREFERENCE = 100% BEHAVIORAL:
+   Example: "bhai mujhe subah coding krna pasand hai"
+   -> `has_ltm_facts`: false, `ltm_triplets`: []
+   -> `has_behavioral_patterns`: true (because knowing the user likes morning coding is needed automatically when Jarvis builds a schedule or plans a project).
+3. COMPOUND SENTENCE SPLIT:
+   Example: "Mai apne naye project GhostVault par roz raat 8 bje kaam karta hu"
+   -> Extract static entity ownership into `ltm_triplets`: `User --(DEVELOPS)--> GhostVault`
+   -> Extract time routine into `behavioral_patterns`: "User works on Project GhostVault daily at 8 PM"
+4. 1-YEAR STABILITY TEST: Ignore one-time plans ("aaj raat movie dekhunga"), temporary moods ("aaj thak gaya hu"), or direct OS commands ("Chrome khol do"). Return false for both if nothing is permanent/stable.
+5. TRIGGER CONTEXTS (CRITICAL FOR RAG): For every behavioral pattern, populate `trigger_contexts` with 5-8 comma-separated future task scenarios, user goals, or request keywords where Jarvis MUST recall this pattern (e.g., for "mujhe subah coding krna pasand hai", write: "best schedule, daily timetable, starting a new project, planning coding hours, productivity routine, study plan, work slots").
+
+[EXISTING GRAPH RELATIONS (Reuse if applicable for LTM)]:
 {existing_relations_str}
 
-[EXTRACTION RULES]:
-1. REUSE RELATIONS FIRST: Look at the [EXISTING GRAPH RELATIONS] list above. If an exact or highly similar relation already exists, YOU MUST USE IT (e.g., if FATHER is there, use it).
-2. INVENTING RELATIONS: If no suitable relation exists, you are free to invent a new one. The new relation MUST be UPPERCASE, strictly 1-3 words, and represent a permanent state (e.g., LIKES, OWNS, WORKS_AS).
-3. ENTITY VS ATTRIBUTE (CRITICAL): If the target is an attribute like a phone number, email address, or age, DO NOT make the relation a number (e.g. 9927272822). Use a general property relation like HAS_CONTACT, HAS_PHONE, HAS_EMAIL, or HAS_AGE, and put the actual data in the "target".
-4. NODE REUSE: Check the [EXISTING GRAPH NODES] below. If the concept exists, use the EXACT matching node name.
-5. ENTITY NORMALIZATION: Keep entities short (1-3 words max) and in Title Case. Strip all articles (A, An, The).
-6. PRONOUN RESOLUTION: Resolve pronouns (he/she/it) using the Context History. Replace pronouns with actual entity names.
-7. CONFLICT RESOLUTION: If a new fact contradicts an existing node in the graph, extract the NEW fact and explicitly explain the override in your reasoning.
-
-[EXISTING GRAPH NODES]:
+[EXISTING GRAPH NODES (Reuse exact node name if applicable for LTM)]:
 {existing_nodes_str}
 
-[Context History]:
+[Recent Conversation Context]:
 {recent_history if recent_history else 'No recent history.'}
 
 [User's Latest Message]: "{message}"
 
-Return STRICT JSON exactly in this schema:
+Return STRICT JSON matching this exact schema:
 {{
-    "reasoning": "Explain why this passes the 1-Year Test and why you chose/invented this relation.",
-    "is_permanent_fact": boolean,
-    "triplets": [
-        {{
-            "source": "Entity1",
-            "relation": "YOUR_RELATION",
-            "target": "Entity2",
-            "metadata": {{
-                "confidence": float,
-                "context": "Brief context about this relation",
-                "source_message": "Exact sentence or snippet proving this fact"
-            }},
-            "inverse": {{
-                "relation": "INVERSE_RELATION_NAME",
-                "target": "Entity1"
-            }}
-        }}
-    ]
-}}
-"""
-        for _ in range(3):
-            try:
-                response = self.ltm_client.chat.completions.create(
-                    model=LTM_EXTRACTION_MODEL,
-                    messages=[
-                        {"role": "system", "content": "You are a precise, autonomous knowledge graph extraction engine. Output strictly valid JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.0,
-                    response_format={"type": "json_object"}
-                )
-                raw_text = response.choices[0].message.content.strip()
-                clean_text = re.sub(r'^```json\n|```$', '', raw_text, flags=re.MULTILINE).strip()
-                data = json.loads(clean_text)
+  "reasoning": "Brief 1-sentence explanation of why this belongs to LTM, Behavioral, both (split), or neither.",
+  "has_ltm_facts": boolean,
+  "ltm_triplets": [
+    {{
+      "source": "Entity1",
+      "relation": "UPPERCASE_RELATION",
+      "target": "Entity2",
+      "metadata": {{
+        "confidence": 0.9,
+        "context": "Brief context",
+        "source_message": "Exact user snippet"
+      }},
+      "inverse": {{
+        "relation": "INVERSE_RELATION",
+        "target": "Entity1"
+      }}
+    }}
+  ],
+  "has_behavioral_patterns": boolean,
+  "behavioral_patterns": [
+    {{
+      "type": "routine|preference|habit|dislike",
+      "raw_statement": "Verbatim user quote from the message",
+      "meaning": "Clear one-line English interpretation of the behavior/preference",
+      "trigger_contexts": "Comma-separated future user requests/tasks where Jarvis should apply this pattern",
+      "confidence": 0.8
+    }}
+  ]
+}}"""
 
-                if data.get("is_permanent_fact") is True:
-                    triplets = data.get("triplets", [])
-                    if triplets:
-                        try:
-                            from core.brain.Memory.LifetimeMemory import ltm_engine
-                            for t in triplets:
-                                src = str(t.get("source", "")).strip().title()
-                                rel = str(t.get("relation", "")).strip().upper()
-                                tgt = str(t.get("target", "")).strip().title()
-                                metadata = t.get("metadata", {})
-                                inverse = t.get("inverse")
+            for _ in range(3):
+                try:
+                    response = self.ltm_client.chat.completions.create(
+                        model=LTM_EXTRACTION_MODEL,
+                        messages=[
+                            {"role": "system", "content": "You are a precise hybrid memory classification and extraction engine. Output strictly valid JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.0,
+                        max_tokens=800,
+                        response_format={"type": "json_object"}
+                    )
+                    raw_text = response.choices[0].message.content.strip()
+                    clean_text = re.sub(r'^```json\n|```$', '', raw_text, flags=re.MULTILINE).strip()
+                    data = json.loads(clean_text)
 
-                                if not (src and rel and tgt) or not self._is_valid_triplet(src, rel, tgt):
-                                    continue
+                    logger.info(
+                        f"🧠 Hybrid Extraction | LTM={data.get('has_ltm_facts')} ({len(data.get('ltm_triplets', []))}) "
+                        f"| Behavioral={data.get('has_behavioral_patterns')} ({len(data.get('behavioral_patterns', []))})"
+                    )
 
-                                with ltm_engine._lock:
-                                    if ltm_engine.graph.has_edge(src, tgt):
-                                        existing_rel = ltm_engine.graph.edges[src, tgt].get('relation')
-                                        if existing_rel == 'HAS_RELATION' and rel != 'HAS_RELATION':
-                                            ltm_engine.graph.remove_edge(src, tgt)
-                                    ltm_engine.record_triplet(src, rel, tgt, metadata=metadata, inverse=inverse)
-                                    logger.info(f"LTM Final DB Entry: [{src}] --({rel})--> [{tgt}]")
-                        except Exception as e:
-                            logger.error(f"LTM Engine Save Error: {e}")
-                break
-            except Exception as e:
-                logger.error(f"LTM API parsing/request error: {e}")
-                time.sleep(1)
+                    if data.get("has_ltm_facts") is True:
+                        triplets = data.get("ltm_triplets", [])
+                        if triplets:
+                            try:
+                                from core.brain.Memory.LifetimeMemory import ltm_engine
+                                for t in triplets:
+                                    src = str(t.get("source", "")).strip().title()
+                                    rel = str(t.get("relation", "")).strip().upper()
+                                    tgt = str(t.get("target", "")).strip().title()
+                                    metadata = t.get("metadata", {})
+                                    inverse = t.get("inverse")
+
+                                    if not (src and rel and tgt) or not self._is_valid_triplet(src, rel, tgt):
+                                        continue
+
+                                    with ltm_engine._lock:
+                                        if ltm_engine.graph.has_edge(src, tgt):
+                                            existing_rel = ltm_engine.graph.edges[src, tgt].get('relation')
+                                            if existing_rel == 'HAS_RELATION' and rel != 'HAS_RELATION':
+                                                ltm_engine.graph.remove_edge(src, tgt)
+                                        ltm_engine.record_triplet(src, rel, tgt, metadata=metadata, inverse=inverse)
+                                        logger.info(f"LTM Final DB Entry: [{src}] --({rel})--> [{tgt}]")
+                            except Exception as e:
+                                logger.error(f"LTM Engine Save Error: {e}")
+
+                    if data.get("has_behavioral_patterns") is True:
+                        patterns = data.get("behavioral_patterns", [])
+                        if patterns:
+                            try:
+                                from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+                                for p in patterns:
+                                    if not isinstance(p, dict):
+                                        continue
+                                    if not p.get("raw_statement"):
+                                        p["raw_statement"] = message.strip()
+                                    behavioral_pattern_engine._upsert_pattern(p)
+                            except Exception as e:
+                                logger.error(f"Behavioral Engine Save Error: {e}")
+
+                    break
+                except Exception as e:
+                    logger.error(f"Hybrid Memory API parsing/request error: {e}")
+                    time.sleep(1)
 
     def _start_background_pruning(self):
         try:
@@ -763,8 +839,7 @@ Return STRICT JSON exactly in this schema:
             ignore_words = ["ok", "okay", "yes", "no", "thanks", "thank you", "clear", "done", "nice", "cool", "hmm", "acha"]
             if role == "USER" and message.lower().strip() not in ignore_words:
                 self._track_session_state(message)
-                self._async_extract_permanent_facts(message)
-                self._async_extract_behavioral_patterns(message)
+                self._async_extract_hybrid_memory(message)
         except Exception as e:
             logger.error(f"Error adding message to memory: {e}")
 
@@ -939,7 +1014,7 @@ Return STRICT JSON exactly in this schema:
             if summary_blocks:
                 parts.append(
                     f"=== DAILY SUMMARIES (older days, up to {MEMORY_SUMMARY_RETENTION_DAYS} days) ===\n"
-                    + "\n".join(summary_blocks)
+                    + "\n\n".join(summary_blocks)
                 )
             return "\n\n".join(parts)
         except Exception as e:

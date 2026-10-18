@@ -11,6 +11,7 @@ from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cosine
 from core.logger.logger import logger
 
+
 class LifetimeMemoryEngine:
     def __init__(self):
         self.db_path = Path("Data/jarvis_memory/lifetime_graph.json")
@@ -23,7 +24,7 @@ class LifetimeMemoryEngine:
         self.embedder = SentenceTransformer('BAAI/bge-small-en-v1.5')
         self.node_embeddings = {}
         self.metadata_embeddings = {}
-        self.relation_embeddings = {} 
+        self.relation_embeddings = {}
 
         self._load_graph()
         self._start_auto_cleanup()
@@ -44,7 +45,7 @@ class LifetimeMemoryEngine:
                     self.metadata_embeddings[msg] = self._get_embedding(msg)
             if 'relation' in data:
                 unique_relations.add(data['relation'].upper())
-        
+
         if unique_relations:
             rel_list = list(unique_relations)
             with self._embed_lock:
@@ -96,7 +97,6 @@ class LifetimeMemoryEngine:
             return [n[0] for n in nodes[:limit]]
 
     def get_all_relations(self, limit=50):
-        """Returns a list of unique relations currently in the graph."""
         with self._lock:
             relations = set()
             for u, v, data in self.graph.edges(data=True):
@@ -105,29 +105,28 @@ class LifetimeMemoryEngine:
             return list(relations)[:limit]
 
     def _deduplicate_relation(self, rel, threshold=0.85):
-        """Uses Semantic Similarity to auto-merge synonymous relations."""
-        if not rel: 
+        if not rel:
             return rel
         rel = rel.upper()
-        
+
         with self._lock:
             if rel in self.relation_embeddings:
                 return rel
-            
+
             rel_emb = self._get_embedding(rel)
             best_match = None
             best_sim = -1
-            
+
             for ex_rel, ex_emb in self.relation_embeddings.items():
                 sim = 1 - cosine(rel_emb, ex_emb)
                 if sim > best_sim:
                     best_sim = sim
                     best_match = ex_rel
-                    
+
             if best_match and best_sim >= threshold:
                 logger.info(f"🧠 LTM Semantic Deduplication: Merged '{rel}' -> '{best_match}' (Sim: {best_sim:.2f})")
                 return best_match
-                
+
             self.relation_embeddings[rel] = rel_emb
             return rel
 
@@ -181,12 +180,11 @@ class LifetimeMemoryEngine:
     def record_triplet(self, source, relation, target, date_str=None, metadata=None, inverse=None):
         if not source or not relation or not target:
             return
-        
+
         src = str(source).strip().title()
         tgt = str(target).strip().title()
-      
         rel = self._deduplicate_relation(str(relation).strip())
-        
+
         if not src or not rel or not tgt:
             return
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
@@ -219,7 +217,7 @@ class LifetimeMemoryEngine:
             if inverse:
                 inv_tgt = str(inverse.get("target", "")).strip().title()
                 inv_rel = self._deduplicate_relation(str(inverse.get("relation", "")).strip())
-                
+
                 if inv_rel and inv_tgt:
                     inv_edge_data = self.graph.get_edge_data(tgt, inv_tgt, default=None)
                     if inv_edge_data is not None and inv_edge_data.get('relation') == inv_rel:
@@ -354,40 +352,5 @@ class LifetimeMemoryEngine:
         res_str = "\n".join(unique[:20])
         return f"Observation: Found relations in Graph Memory:\n{res_str}"
 
-    def get_behavioral_graph_signals(self, query_text, top_k=4, query_emb=None):
-        if not query_text or not str(query_text).strip():
-            return []
-        with self._lock:
-            if not self.node_embeddings:
-                return []
-            if query_emb is not None and len(query_emb) == 384:
-                q_emb = np.array(query_emb, dtype=np.float32)
-            else:
-                q_emb = self._get_embedding(str(query_text).strip())
-            scored_edges = []
-            for u, v, data in self.graph.edges(data=True):
-                if data.get("archived", False):
-                    continue
-                u_emb = self.node_embeddings.get(u)
-                v_emb = self.node_embeddings.get(v)
-                sim_u = (1.0 - cosine(q_emb, u_emb)) if u_emb is not None else 0.0
-                sim_v = (1.0 - cosine(q_emb, v_emb)) if v_emb is not None else 0.0
-                max_sim = max(sim_u, sim_v)
-                weight = float(data.get("weight", 1) or 1)
-                count = int(data.get("count", 1) or 1)
-                if max_sim >= 0.68 or (u.lower() == "user" and weight >= 2.0 and max_sim >= 0.55):
-                    rel = data.get("relation", "RELATES_TO")
-                    score = max_sim * (1.0 + 0.25 * min(weight, 8.0) + 0.15 * min(count, 8))
-                    scored_edges.append((score, f"[{u}] --({rel})--> [{v}] (seen={count}x)"))
-            scored_edges.sort(key=lambda x: x[0], reverse=True)
-            seen = set()
-            out = []
-            for _, text_val in scored_edges:
-                if text_val not in seen:
-                    seen.add(text_val)
-                    out.append(text_val)
-                if len(out) >= top_k:
-                    break
-            return out
 
 ltm_engine = LifetimeMemoryEngine()
