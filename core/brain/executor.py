@@ -3,7 +3,7 @@ from typing import Dict, List, Callable, Any
 from concurrent.futures import ThreadPoolExecutor
 from core.logger.logger import logger
 from core.utils.shutdown import is_shutdown
-from tools.OpenCloseApps.open_any import open_any_app
+from tools.OpenCloseApps.open_any import open_any_app, open_url, open_urls_batch
 from tools.OpenCloseApps.close_any import close_any_app
 from tools.ImageGeneration.generate_image import handle_image_command
 from tools.SearchTools.SearchHub import execute_search_actions
@@ -183,13 +183,11 @@ def execute_actions(result: Dict[str, any], executor: ThreadPoolExecutor) -> str
 
         if result.get('urls_to_open'):
             def thread_open_urls(urls):
-                for url in urls:
-                    if url.startswith('http'):
-                        log_action(f"🔗 Opening Dynamic Link: {url}")
-                        try:
-                            webbrowser.open(url)
-                        except Exception as e:
-                            logger.error(f"❌ Failed to open link {url}. Error: {e}")
+                opened_msgs, failed_msgs = open_urls_batch(urls)
+                for msg in opened_msgs:
+                    log_action(f"🔗 {msg}")
+                for msg in failed_msgs:
+                    logger.error(f"❌ {msg}")
             executor.submit(thread_open_urls, result['urls_to_open'])
 
         if result.get('volume'):
@@ -710,14 +708,15 @@ def handle_system_controller(system_ctrl: dict) -> str:
 
     urls_to_open = system_ctrl.get('urls_to_open')
     if urls_to_open and isinstance(urls_to_open, list):
-        try:
-            for url in urls_to_open:
-                if url.startswith('http'): webbrowser.open(url)
-            sys_observations.append(f"Opened URLs: {', '.join(urls_to_open)}")
-            logger.info(f"✅ System Controller opened URLs: {urls_to_open}")
-        except Exception as e:
-            logger.error(f"❌ URL open error: {e}")
-            sys_observations.append(f"URL open error: {e}")
+        opened_msgs, failed_msgs = open_urls_batch(urls_to_open)
+
+        if opened_msgs:
+            sys_observations.append(f"Opened URLs: {' | '.join(opened_msgs)}")
+            logger.info(f"✅ System Controller opened URLs: {opened_msgs}")
+
+        if failed_msgs:
+            sys_observations.append(f"Failed URLs: {' | '.join(failed_msgs)}")
+            logger.error(f"❌ System Controller URL failures: {failed_msgs}")
 
     youtube_query = system_ctrl.get('youtube_play')
     if youtube_query and isinstance(youtube_query, str) and youtube_query.strip():

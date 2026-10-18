@@ -1,6 +1,74 @@
 import webbrowser
+from pathlib import Path
+from urllib.parse import urlparse, unquote
+from typing import Tuple, List
+
 from AppOpener import open as open_app
 from core.logger.logger import logger
+
+_ALLOWED_SCHEMES = ("http", "https", "file")
+
+
+def resolve_to_url(target: str) -> str:
+    if target is None:
+        return ""
+
+    raw = str(target).strip().strip('"').strip("'")
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+
+    if scheme in ("http", "https"):
+        return raw
+
+    if scheme == "file":
+        try:
+            path_str = unquote(parsed.path)
+            # Windows: "/C:/Users/..." → "C:/Users/..."
+            if len(path_str) > 2 and path_str[0] == "/" and path_str[2] == ":":
+                path_str = path_str[1:]
+            return Path(path_str).as_uri()
+        except Exception:
+            return raw
+
+    # Case 3: Raw local path (absolute or relative)
+    try:
+        p = Path(raw)
+        if p.exists():
+            return p.as_uri()
+    except Exception:
+        pass
+
+    return ""
+
+
+def open_url(target: str) -> Tuple[bool, str]:
+    """Open a URL or local file path in the default browser.
+
+    Returns (success: bool, human_message: str).
+    """
+    url = resolve_to_url(target)
+    if not url:
+        return False, f"Unsupported or invalid target: {target}"
+
+    try:
+        result = webbrowser.open(url)
+        if result is False:
+            return False, f"Browser refused to open: {url}"
+        return True, f"Opened: {url}"
+    except Exception as e:
+        return False, f"Failed to open {url}: {e}"
+
+
+def open_urls_batch(targets: List[str]) -> Tuple[List[str], List[str]]:
+    """Open multiple URLs/paths. Returns (opened_messages, failed_messages)."""
+    opened, failed = [], []
+    for t in targets or []:
+        ok, msg = open_url(t)
+        (opened if ok else failed).append(msg)
+    return opened, failed
 
 APP_PATHS = {}
 
@@ -36,12 +104,13 @@ def open_any_app(apps_to_open, silent=False):
 
         except Exception as e:
             logger.warning(f"App '{name}' not found on system. Trying web fallback...")
-            try:
-                url = f"https://www.{name_lower.replace(' ', '')}.com"
-                webbrowser.open(url)
+            fallback_url = f"https://www.{name_lower.replace(' ', '')}.com"
+            ok, msg = open_url(fallback_url)
+            if ok:
                 opened.append(f"{name} (web)")
-            except Exception as web_e:
-                logger.error(f"Failed to open {name} completely: {web_e}")
+                logger.info(f"Successfully opened via web fallback: {name}")
+            else:
+                logger.error(f"Failed to open {name} completely: {msg}")
                 failed.append(name)
 
     if not silent and (opened or failed):
