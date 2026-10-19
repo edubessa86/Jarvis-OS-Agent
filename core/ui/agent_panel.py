@@ -1399,20 +1399,59 @@ class AgentPanel(QWidget):
         if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
             self.show_anim_group.stop()
 
+    def sync_thought_viewer_height(self, for_width: int) -> int:
+        self.flush_pending_thought()
+        has_extra_card = (
+            (self.awaiting_confirmation and self.preview_card.isVisible())
+            or (self.obs_card.isVisible() and bool(self.obs_label.text().strip()))
+        )
+
+        if not self._current_thought_text.strip():
+            if has_extra_card:
+                self.thought_viewer.hide()
+                return 0
+            self.thought_viewer.show()
+            self.thought_viewer.setFixedHeight(32)
+            return 32
+
+        self.thought_viewer.show()
+        avail_w = max(200, for_width - 98)
+        doc = self.thought_viewer.document()
+        doc.setTextWidth(avail_w)
+        doc_h = int(math.ceil(doc.size().height())) + 4
+
+        if self.awaiting_confirmation and self.preview_card.isVisible():
+            max_h = 88
+        else:
+            max_h = max(88, self.user_height - 106)
+
+        clamped_h = max(28, min(max_h, doc_h))
+        self.thought_viewer.setFixedHeight(clamped_h)
+        if not self.thought_viewer.user_scrolled_up:
+            vbar = self.thought_viewer.verticalScrollBar()
+            vbar.setValue(vbar.maximum())
+        return clamped_h
+
     def get_extra_cards_height(self, for_width: int) -> int:
         if self.awaiting_confirmation and self.preview_card.isVisible():
-            extra_height = 200
+            extra_height = 178
             if self.preview_subject_input.isVisible():
                 extra_height += 38
             if self.preview_attachment_label.isVisible():
                 extra_height += 30
+            self.preview_card.setFixedHeight(extra_height)
             return extra_height
+        self.preview_card.setMinimumHeight(0)
+        self.preview_card.setMaximumHeight(16777215)
         if self.obs_card.isVisible() and self.obs_label.text().strip():
             fm = QFontMetrics(self.obs_label.font())
-            avail_w = max(180, for_width - 108)
+            avail_w = max(180, for_width - 118)
             bound = fm.boundingRect(0, 0, avail_w, 300, Qt.TextWordWrap, self.obs_label.text())
-            obs_h = min(72, max(24, bound.height() + 4))
-            return obs_h + 34
+            obs_h = min(90, max(36, bound.height() + 20))
+            self.obs_card.setFixedHeight(obs_h)
+            return obs_h
+        self.obs_card.setMinimumHeight(0)
+        self.obs_card.setMaximumHeight(16777215)
         return 0
 
     def perform_interactive_resize(self, global_pos: QPoint):
@@ -1426,18 +1465,31 @@ class AgentPanel(QWidget):
             w = max(self.MIN_WIDTH, min(self.MAX_WIDTH, start.width() - delta.x()))
             x = start.right() - w + 1
 
-        extra_h = self.get_extra_cards_height(w)
-        min_total_h = self.MIN_HEIGHT + extra_h
-        max_total_h = self.MAX_HEIGHT + extra_h
+        if self.awaiting_confirmation and self.preview_card.isVisible():
+            thought_h = self.sync_thought_viewer_height(w)
+            preview_h = self.get_extra_cards_height(w)
+            h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
+            if "top" in self.resize_edge:
+                y = start.bottom() - h + 1
+            self.user_width = w
+        else:
+            extra_h = self.get_extra_cards_height(w)
+            min_total_h = self.MIN_HEIGHT + extra_h
+            max_total_h = self.MAX_HEIGHT + extra_h
 
-        if "bottom" in self.resize_edge:
-            h = max(min_total_h, min(max_total_h, start.height() + delta.y()))
-        elif "top" in self.resize_edge:
-            h = max(min_total_h, min(max_total_h, start.height() - delta.y()))
-            y = start.bottom() - h + 1
+            if "bottom" in self.resize_edge:
+                h = max(min_total_h, min(max_total_h, start.height() + delta.y()))
+            elif "top" in self.resize_edge:
+                h = max(min_total_h, min(max_total_h, start.height() - delta.y()))
+                y = start.bottom() - h + 1
 
-        self.user_width = w
-        self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
+            self.user_width = w
+            self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
+            thought_h = self.sync_thought_viewer_height(w)
+            h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
+            if "top" in self.resize_edge:
+                y = start.bottom() - h + 1
+
         self.custom_pos = QPoint(x, y)
 
         new_rect = QRect(x, y, w, h)
@@ -1604,6 +1656,8 @@ class AgentPanel(QWidget):
             self._current_thought_text = self._pending_thought_text
             self._pending_thought_text = None
             self.render_thought_now()
+            if self.isVisible():
+                self.show_panel()
 
     def update_glow_effect(self):
         self.gradient_phase += 0.045
@@ -1642,9 +1696,10 @@ class AgentPanel(QWidget):
 
     def calculate_target_geometry(self):
         fixed_width = self.user_width
-        base_height = self.user_height
+        thought_h = self.sync_thought_viewer_height(fixed_width)
         extra_height = self.get_extra_cards_height(fixed_width)
-        fixed_height = base_height + extra_height
+
+        fixed_height = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_height if extra_height > 0 else 0)
 
         self.layout.activate()
         self.wrapper_layout.activate()
@@ -1767,7 +1822,7 @@ class AgentPanel(QWidget):
             self.preview_attachment_label.hide()
 
         self.obs_card.hide()
-        self.separator.show()
+        self.separator.hide()
         self.preview_card.show()
         self.show_panel()
         self.activateWindow()
@@ -1948,6 +2003,19 @@ class AgentPanel(QWidget):
             if step > 0 and self.current_step != step:
                 self.phase_label.setText(f"Step {step:02}")
                 self.current_step = step
+            if thought:
+                clean_thought = thought.strip()
+                if len(clean_thought) > self.MAX_THOUGHT_CHARS:
+                    cutoff_idx = len(clean_thought) - self.MAX_THOUGHT_CHARS
+                    newline_pos = clean_thought.find("\n", cutoff_idx)
+                    if newline_pos != -1:
+                        clean_thought = "...\n" + clean_thought[newline_pos + 1:].strip()
+                    else:
+                        clean_thought = "... " + clean_thought[-self.MAX_THOUGHT_CHARS:]
+                self._current_thought_text = clean_thought
+                self._pending_thought_text = None
+                self.render_thought_now()
+                self.show_panel()
             return
 
         if status == self.last_status:
@@ -2007,19 +2075,17 @@ class AgentPanel(QWidget):
             if len(clean_obs) > 155:
                 clean_obs = clean_obs[:152] + "..."
 
-            if self.obs_label.text() != clean_obs:
+            if self.obs_label.text() != clean_obs or not self.obs_card.isVisible():
                 self.set_label_font(self.obs_label, clean_obs, 9, QFont.Normal)
                 self.obs_label.setText(clean_obs)
                 self.obs_card.set_accent(self.current_rgb)
-                self.separator.show()
+                self.separator.hide()
                 self.obs_card.show()
         else:
             if self.obs_card.isVisible():
                 self.obs_label.setText("")
                 self.separator.hide()
                 self.obs_card.hide()
-
-        self.show_panel()
 
         if thought:
             clean_thought = thought.strip()
@@ -2034,6 +2100,8 @@ class AgentPanel(QWidget):
             self.schedule_thought_render(clean_thought)
         else:
             self.schedule_thought_render("")
+
+        self.show_panel()
 
         if is_task_complete:
             self.hide_timer.start(4000)
