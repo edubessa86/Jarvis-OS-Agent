@@ -261,14 +261,15 @@ class ContextMemory:
             last_shot = self.ephemeral.get("last_screenshot")
 
             beh_block = ""
-            try:
-                from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
-                beh_block = behavioral_pattern_engine.format_ephemeral_block(
-                    current_command=current_command,
-                    mode=mode,
-                )
-            except Exception as e:
-                logger.error(f"Behavioral ephemeral inject error ({mode}): {e}")
+            if mode != "fast":
+                try:
+                    from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
+                    beh_block = behavioral_pattern_engine.format_ephemeral_block(
+                        current_command=current_command,
+                        mode=mode,
+                    )
+                except Exception as e:
+                    logger.error(f"Behavioral ephemeral inject error ({mode}): {e}")
 
             if mode == "fast":
                 lines = []
@@ -282,8 +283,6 @@ class ContextMemory:
                 out_blocks = []
                 if lines:
                     out_blocks.append("[[RECENT AGENT ACTIVITY]]\n" + "\n".join(lines))
-                if beh_block:
-                    out_blocks.append(beh_block)
                 return ("\n\n".join(out_blocks) + "\n") if out_blocks else ""
 
             lines = []
