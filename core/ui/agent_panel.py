@@ -88,6 +88,7 @@ class MarkdownRenderer:
 
     CODE_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\n?(.*?)```", re.DOTALL)
     INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+    LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
     BOLD_ITALIC_RE = re.compile(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*")
     BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__")
     ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*|\s)(.+?)(?<!\*|\s)\*(?!\*)")
@@ -102,6 +103,20 @@ class MarkdownRenderer:
             s = match.group(0)
             return "\u200b".join(s[i:i + 45] for i in range(0, len(s), 45))
         return cls.LONG_TOKEN_RE.sub(inject_zwsp, text)
+
+    @classmethod
+    def _apply_bold_italic(cls, text: str) -> str:
+        text = cls.BOLD_ITALIC_RE.sub(
+            r'<b style="color: #FFFFFF;"><i>\1</i></b>', text
+        )
+        text = cls.BOLD_RE.sub(
+            lambda m: f'<b style="color: #FFFFFF;">{m.group(1) or m.group(2)}</b>',
+            text
+        )
+        text = cls.ITALIC_RE.sub(
+            r'<i style="color: rgba(235, 235, 250, 0.92);">\1</i>', text
+        )
+        return text
 
     @classmethod
     def auto_heal_markdown(cls, text: str) -> str:
@@ -144,8 +159,9 @@ class MarkdownRenderer:
         return highlighted
 
     @classmethod
-    def format_inline(cls, text: str) -> str:
+    def format_inline(cls, text: str, accent_hex: str = "rgb(191, 90, 242)") -> str:
         inline_vault = []
+        link_vault = []
 
         def save_inline_code(m):
             idx = len(inline_vault)
@@ -157,19 +173,24 @@ class MarkdownRenderer:
             )
             return f"@@INLINECODE_{idx}@@"
 
-        processed = cls.INLINE_CODE_RE.sub(save_inline_code, text)
-        processed = html.escape(cls._soft_wrap_long_tokens(processed))
+        def save_link(m):
+            idx = len(link_vault)
+            raw_text = html.escape(cls._soft_wrap_long_tokens(m.group(1)))
+            styled_text = cls._apply_bold_italic(raw_text)
+            safe_url = html.escape(m.group(2), quote=True)
+            link_vault.append(
+                f'<a href="{safe_url}" style="color: {accent_hex}; '
+                f'text-decoration: underline; font-weight: 500;">{styled_text}</a>'
+            )
+            return f"@@LINK_{idx}@@"
 
-        processed = cls.BOLD_ITALIC_RE.sub(
-            r'<b style="color: #FFFFFF;"><i>\1</i></b>', processed
-        )
-        processed = cls.BOLD_RE.sub(
-            lambda m: f'<b style="color: #FFFFFF;">{m.group(1) or m.group(2)}</b>',
-            processed
-        )
-        processed = cls.ITALIC_RE.sub(
-            r'<i style="color: rgba(235, 235, 250, 0.92);">\1</i>', processed
-        )
+        processed = cls.INLINE_CODE_RE.sub(save_inline_code, text)
+        processed = cls.LINK_RE.sub(save_link, processed)
+        processed = html.escape(cls._soft_wrap_long_tokens(processed))
+        processed = cls._apply_bold_italic(processed)
+
+        for idx, link_html in enumerate(link_vault):
+            processed = processed.replace(f"@@LINK_{idx}@@", link_html)
 
         for idx, badge_html in enumerate(inline_vault):
             processed = processed.replace(f"@@INLINECODE_{idx}@@", badge_html)
@@ -237,7 +258,7 @@ class MarkdownRenderer:
             h_match = cls.HEADING_RE.match(stripped)
             if h_match:
                 level = len(h_match.group(1))
-                h_text = cls.format_inline(h_match.group(2))
+                h_text = cls.format_inline(h_match.group(2), accent_hex)
                 h_size = max(body_pt, body_pt + (3 - level))
                 h_color = "#FFFFFF" if level <= 2 else "#8BE9FD"
                 out_lines.append(
@@ -247,7 +268,7 @@ class MarkdownRenderer:
                 continue
 
             if stripped.startswith(">"):
-                q_text = cls.format_inline(stripped.lstrip(">").strip())
+                q_text = cls.format_inline(stripped.lstrip(">").strip(), accent_hex)
                 out_lines.append(
                     f'<div style="margin: 3px 0px 3px 8px; color: rgba(210, 214, 235, 0.85); '
                     f'font-style: italic;"><span style="color: {accent_hex}; font-weight: bold;">▎ </span>{q_text}</div>'
@@ -257,7 +278,7 @@ class MarkdownRenderer:
             b_match = cls.BULLET_RE.match(line)
             if b_match:
                 indent_px = 6 + min(36, len(b_match.group(1)) * 6)
-                b_text = cls.format_inline(b_match.group(2))
+                b_text = cls.format_inline(b_match.group(2), accent_hex)
                 out_lines.append(
                     f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
                     f'<span style="color: {accent_hex}; font-weight: bold;">•&nbsp;</span>{b_text}</div>'
@@ -268,7 +289,7 @@ class MarkdownRenderer:
             if n_match:
                 indent_px = 6 + min(36, len(n_match.group(1)) * 6)
                 num_str = n_match.group(2)
-                n_text = cls.format_inline(n_match.group(3))
+                n_text = cls.format_inline(n_match.group(3), accent_hex)
                 out_lines.append(
                     f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
                     f'<span style="color: {accent_hex}; font-weight: bold;">{num_str}.&nbsp;</span>{n_text}</div>'
@@ -277,7 +298,7 @@ class MarkdownRenderer:
 
             out_lines.append(
                 f'<div style="margin-top: 2px; margin-bottom: 2px; line-height: 1.40; word-wrap: break-word;">'
-                f'{cls.format_inline(line)}</div>'
+                f'{cls.format_inline(line, accent_hex)}</div>'
             )
 
         body_html = "".join(out_lines)
@@ -292,12 +313,12 @@ class ThoughtViewer(QTextBrowser):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
-        self.setOpenExternalLinks(False)
-        self.setOpenLinks(False)
+        self.setOpenExternalLinks(True)
+        self.setOpenLinks(True)
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
         self.viewport().setCursor(Qt.ArrowCursor)
         self.document().setDocumentMargin(4)
 
@@ -323,6 +344,13 @@ class ThoughtViewer(QTextBrowser):
 
         vbar.sliderPressed.connect(self._on_user_slider_interaction)
         vbar.valueChanged.connect(self._on_vbar_value_changed)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if self.anchorAt(event.pos()):
+            self.viewport().setCursor(Qt.PointingHandCursor)
+        else:
+            self.viewport().setCursor(Qt.ArrowCursor)
 
     def _on_user_slider_interaction(self):
         vbar = self.verticalScrollBar()
@@ -728,19 +756,6 @@ class IslandContainer(QFrame):
 
         rect = QRectF(self.rect())
         r, g, b = [max(0, min(255, int(c))) for c in self.rgb]
-
-        shadow_steps = [
-            (1.0, 4.0, 30.0, QColor(0, 0, 0, 18)),
-            (2.5, 4.0, 29.5, QColor(0, 0, 0, 34)),
-            (4.5, 3.0, 29.0, QColor(0, 0, 0, 50)),
-            (6.5, 2.0, 28.5, QColor(r, g, b, 22)),
-            (8.0, 1.0, 28.0, QColor(0, 0, 0, 80)),
-        ]
-        painter.setPen(Qt.NoPen)
-        for inset, y_offset, rad, col in shadow_steps:
-            s_rect = rect.adjusted(inset, inset + y_offset * 0.4, -inset, -inset + y_offset * 0.6)
-            painter.setBrush(col)
-            painter.drawRoundedRect(s_rect, rad, rad)
 
         island_rect = rect.adjusted(9.0, 7.0, -9.0, -11.0)
         radius = self.corner_radius
@@ -1371,6 +1386,13 @@ class AgentPanel(QWidget):
             curr = curr.parentWidget()
         return False
 
+    def _is_link_click(self, obj, global_pos):
+        if obj is self.thought_viewer or obj is self.thought_viewer.viewport():
+            vp = self.thought_viewer.viewport()
+            vp_pos = vp.mapFromGlobal(global_pos)
+            return bool(self.thought_viewer.anchorAt(vp_pos))
+        return False
+
     def stop_active_geometry_animations(self):
         if self.resize_anim.state() == QPropertyAnimation.Running:
             self.resize_anim.stop()
@@ -1459,7 +1481,7 @@ class AgentPanel(QWidget):
                 return True
 
             if event.buttons() == Qt.NoButton:
-                if self.is_interactive_child(obj):
+                if self.is_interactive_child(obj) or self._is_link_click(obj, global_pos):
                     self.clear_override_cursor()
                 else:
                     edge = self.detect_resize_edge(local_pos)
@@ -1468,6 +1490,10 @@ class AgentPanel(QWidget):
         elif etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             self._interaction_origin = self.geometry().topLeft()
             local_pos, global_pos = self._resolve_mouse_coords(obj, event)
+
+            if self._is_link_click(obj, global_pos):
+                return super().eventFilter(obj, event)
+
             edge = None if self.is_interactive_child(obj) else self.detect_resize_edge(local_pos)
 
             if edge is not None:
