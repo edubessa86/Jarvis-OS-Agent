@@ -16,6 +16,7 @@ Data/stt_status.json
 Data/island_response.json
 Data/typing_status.json
 Data/processed_events.json
+Data/tts_word_sync.json
 Data/tavily_search.log
 Data/tts_status.json
 Data/jarvis.log
