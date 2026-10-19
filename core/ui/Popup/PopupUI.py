@@ -9,21 +9,26 @@ os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false;qt.text.font.db=false;defa
 from PyQt5.QtCore import (
     Qt, QTimer, QPropertyAnimation, QPoint, QPointF,
     QParallelAnimationGroup, QEasingCurve, QFileSystemWatcher,
-    QRect, QRectF, QSize, qInstallMessageHandler
+    QRect, QRectF, QSize, qInstallMessageHandler, QByteArray
 )
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QFrame, QPushButton,
-    QHBoxLayout, QApplication, QSizePolicy
+    QHBoxLayout, QApplication, QSizePolicy, QTextEdit
 )
 from PyQt5.QtGui import (
     QFont, QColor, QFontDatabase, QPainter, QPainterPath,
-    QLinearGradient, QRadialGradient, QPen
+    QLinearGradient, QRadialGradient, QPen, QPixmap,
+    QTextCursor, QTextCharFormat
 )
+from PyQt5.QtSvg import QSvgRenderer
 
 from AsyncBrowser import AsyncTextBrowser
 from TextParser import ParserWorker
 
 TYPING_STATUS_FILE = "Data/typing_status.json"
+TTS_STATUS_FILE = "Data/tts_status.json"
+TTS_COMMAND_FILE = "Data/tts_command.json"
+TTS_WORD_SYNC_FILE = "Data/tts_word_sync.json"
 
 
 def _popup_qt_message_handler(mode, context, message):
@@ -39,6 +44,57 @@ def _popup_qt_message_handler(mode, context, message):
 
 
 qInstallMessageHandler(_popup_qt_message_handler)
+
+
+_SVG_SPEAKER = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path fill="#ffffff" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>'
+    '</svg>'
+)
+
+_SVG_MUTE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path fill="#ffffff" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>'
+    '</svg>'
+)
+
+_SVG_COPY = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path fill="#ffffff" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>'
+    '</svg>'
+)
+
+_SVG_CHECK = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+    '<path fill="#ffffff" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>'
+    '</svg>'
+)
+
+
+def _render_svg_icon(svg_text, size_px, color):
+    try:
+        renderer = QSvgRenderer(QByteArray(svg_text.encode("utf-8")))
+        if not renderer.isValid():
+            return QPixmap()
+
+        src = QPixmap(size_px, size_px)
+        src.fill(Qt.transparent)
+        p = QPainter(src)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        renderer.render(p)
+        p.end()
+
+        tinted = QPixmap(size_px, size_px)
+        tinted.fill(color)
+        p2 = QPainter(tinted)
+        p2.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        p2.drawPixmap(0, 0, src)
+        p2.end()
+
+        return tinted
+    except Exception:
+        return QPixmap()
 
 
 class StatusOrb(QWidget):
@@ -186,11 +242,15 @@ class PremiumCopyButton(QPushButton):
     def __init__(self, font_family="Segoe UI", parent=None):
         super().__init__(parent)
         self.font_family = font_family
-        self.setFixedSize(66, 26)
+        self.setFixedSize(72, 26)
         self.setCursor(Qt.PointingHandCursor)
         self.hover_alpha = 0.0
         self.target_alpha = 0.0
         self.copied_state = False
+
+        self._icon_size = 12
+        self._icon_copy = _render_svg_icon(_SVG_COPY, self._icon_size, QColor(255, 255, 255))
+        self._icon_check = _render_svg_icon(_SVG_CHECK, self._icon_size, QColor(120, 245, 140))
 
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(16)
@@ -202,13 +262,13 @@ class PremiumCopyButton(QPushButton):
 
     def show_copied(self):
         self.copied_state = True
-        self.setFixedSize(74, 26)
+        self.setFixedSize(82, 26)
         self.update()
         self.reset_timer.start(1600)
 
     def _reset_copied(self):
         self.copied_state = False
-        self.setFixedSize(66, 26)
+        self.setFixedSize(72, 26)
         self.update()
 
     def enterEvent(self, event):
@@ -235,6 +295,7 @@ class PremiumCopyButton(QPushButton):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
 
         if self.copied_state:
@@ -242,6 +303,7 @@ class PremiumCopyButton(QPushButton):
             border_col = QColor(50, 215, 75, 130)
             text_col = QColor(120, 245, 140, 255)
             label = "Copied"
+            icon_pix = self._icon_check
         else:
             bg_alpha = int(14 + self.hover_alpha * 26)
             border_alpha = int(22 + self.hover_alpha * 45)
@@ -249,6 +311,7 @@ class PremiumCopyButton(QPushButton):
             border_col = QColor(255, 255, 255, border_alpha)
             text_col = QColor(255, 255, 255, int(175 + self.hover_alpha * 75))
             label = "Copy"
+            icon_pix = self._icon_copy
 
         painter.setBrush(bg_col)
         painter.setPen(QPen(border_col, 1.0))
@@ -256,8 +319,28 @@ class PremiumCopyButton(QPushButton):
 
         font = QFont(self.font_family, 8, QFont.Bold)
         painter.setFont(font)
+        fm = painter.fontMetrics()
+        text_w = fm.horizontalAdvance(label)
+
+        gap = 4.0
+        total_w = self._icon_size + gap + text_w
+        inner_rect = self.rect()
+        start_x = inner_rect.x() + (inner_rect.width() - total_w) / 2.0
+        center_y = inner_rect.y() + inner_rect.height() / 2.0
+
+        if not icon_pix.isNull():
+            icon_x = int(round(start_x))
+            icon_y = int(round(center_y - self._icon_size / 2.0))
+            painter.drawPixmap(icon_x, icon_y, icon_pix)
+
         painter.setPen(text_col)
-        painter.drawText(self.rect(), Qt.AlignCenter, label)
+        text_rect = QRectF(
+            start_x + self._icon_size + gap,
+            float(inner_rect.y()),
+            float(text_w) + 2.0,
+            float(inner_rect.height())
+        )
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, label)
 
 
 class PremiumCloseButton(QPushButton):
@@ -319,6 +402,116 @@ class PremiumCloseButton(QPushButton):
         painter.drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d))
 
 
+class PremiumSpeakerButton(QPushButton):
+    def __init__(self, font_family="Segoe UI", parent=None):
+        super().__init__(parent)
+        self.font_family = font_family
+        self.setFixedSize(32, 26)
+        self.setCursor(Qt.ArrowCursor)
+        self.hover_alpha = 0.0
+        self.target_alpha = 0.0
+        self.speaking = False
+        self.has_content = False
+        self.accent_rgb = [191.0, 90.0, 242.0]
+        self.phase = 0.0
+
+        self._icon_size = 14
+        self._icon_speaker = _render_svg_icon(_SVG_SPEAKER, self._icon_size, QColor(255, 255, 255))
+        self._icon_mute = _render_svg_icon(_SVG_MUTE, self._icon_size, QColor(255, 255, 255))
+
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(16)
+        self.hover_timer.timeout.connect(self.animate_hover)
+
+    def set_speaking(self, speaking):
+        speaking = bool(speaking)
+        if self.speaking != speaking:
+            self.speaking = speaking
+            self._update_cursor()
+            self.update()
+
+    def set_has_content(self, has_content):
+        has_content = bool(has_content)
+        if self.has_content != has_content:
+            self.has_content = has_content
+            self._update_cursor()
+            self.update()
+
+    def set_accent(self, rgb, phase):
+        self.accent_rgb = rgb
+        self.phase = phase
+        if self.speaking:
+            self.update()
+
+    def _update_cursor(self):
+        if self.speaking or self.has_content:
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+    def enterEvent(self, event):
+        if self.speaking or self.has_content:
+            self.target_alpha = 1.0
+            if not self.hover_timer.isActive():
+                self.hover_timer.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.target_alpha = 0.0
+        if not self.hover_timer.isActive():
+            self.hover_timer.start()
+        super().leaveEvent(event)
+
+    def animate_hover(self):
+        diff = self.target_alpha - self.hover_alpha
+        if abs(diff) < 0.04:
+            self.hover_alpha = self.target_alpha
+            self.hover_timer.stop()
+        else:
+            self.hover_alpha += diff * 0.25
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        center = rect.center()
+
+        if self.hover_alpha > 0.01 and (self.speaking or self.has_content):
+            bg_alpha = int(14 + self.hover_alpha * 26)
+            painter.setBrush(QColor(255, 255, 255, bg_alpha))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(rect, 8.0, 8.0)
+
+        if self.speaking:
+            r, g, b = [max(0, min(255, int(c))) for c in self.accent_rgb]
+            pulse = (math.sin(self.phase * 2.2) + 1.0) * 0.5
+            glow_r = 9.5 + pulse * 3.5
+            halo = QRadialGradient(center, glow_r)
+            halo.setColorAt(0.0, QColor(r, g, b, int(130 + pulse * 80)))
+            halo.setColorAt(0.6, QColor(r, g, b, int(40 + pulse * 30)))
+            halo.setColorAt(1.0, QColor(r, g, b, 0))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(halo)
+            painter.drawEllipse(center, glow_r, glow_r)
+
+        icon_pix = self._icon_mute if self.speaking else self._icon_speaker
+        if icon_pix.isNull():
+            return
+
+        if self.speaking:
+            painter.setOpacity(1.0)
+        elif self.has_content:
+            painter.setOpacity(0.62 + self.hover_alpha * 0.38)
+        else:
+            painter.setOpacity(0.28)
+
+        icon_x = int(round(center.x() - self._icon_size / 2.0))
+        icon_y = int(round(center.y() - self._icon_size / 2.0))
+        painter.drawPixmap(icon_x, icon_y, icon_pix)
+
+
 class TypingPopup(QWidget):
     def __init__(self, fallback_text="", max_width=760):
         super().__init__()
@@ -369,6 +562,19 @@ class TypingPopup(QWidget):
         self.custom_pos = None
         self.oldPos = None
         self.auto_scroll_enabled = True
+        self.tts_is_speaking = False
+        self.tts_last_text = ""
+        self._tts_poll_counter = 0
+        self._word_sync_data = None
+        self._word_sync_sentence_id = -1
+        self._word_char_spans = None
+        self._current_highlight_idx = -1
+        self._cached_plain_text = None
+        self._word_sync_poll_counter = 0
+
+        self._word_highlight_timer = QTimer(self)
+        self._word_highlight_timer.setInterval(33)
+        self._word_highlight_timer.timeout.connect(self._tick_word_highlight)
 
         self.init_ui()
         self.start_animations()
@@ -376,10 +582,13 @@ class TypingPopup(QWidget):
         self.file_watcher = QFileSystemWatcher(self)
         if os.path.exists(TYPING_STATUS_FILE):
             self.file_watcher.addPath(TYPING_STATUS_FILE)
+        if os.path.exists(TTS_STATUS_FILE):
+            self.file_watcher.addPath(TTS_STATUS_FILE)
         self.file_watcher.fileChanged.connect(self.on_status_file_changed)
 
         self.master_timer.start(20)
         self.check_status_file()
+        self.check_tts_status()
 
     def minimumSizeHint(self):
         return QSize(0, 0)
@@ -443,6 +652,9 @@ class TypingPopup(QWidget):
         self.mood_pill.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.mood_pill.hide()
 
+        self.speak_btn = PremiumSpeakerButton(self.eng_font, self)
+        self.speak_btn.clicked.connect(self.toggle_tts)
+
         self.copy_btn = PremiumCopyButton(self.eng_font, self)
         self.copy_btn.clicked.connect(self.copy_response_text)
 
@@ -453,6 +665,7 @@ class TypingPopup(QWidget):
         self.header_layout.addWidget(self.status_tag)
         self.header_layout.addWidget(self.mood_pill)
         self.header_layout.addStretch()
+        self.header_layout.addWidget(self.speak_btn)
         self.header_layout.addWidget(self.copy_btn)
         self.header_layout.addWidget(self.close_btn)
         self.container_layout.addLayout(self.header_layout)
@@ -490,6 +703,236 @@ class TypingPopup(QWidget):
         if text_to_copy:
             QApplication.clipboard().setText(text_to_copy)
             self.copy_btn.show_copied()
+
+    def toggle_tts(self):
+        if self.speak_btn.speaking:
+            self._write_tts_command("stop")
+            self.tts_is_speaking = False
+            self.speak_btn.set_speaking(False)
+        elif self.tts_last_text.strip():
+            self._write_tts_command("respeak")
+            self.tts_is_speaking = True
+            self.speak_btn.set_speaking(True)
+
+    def _write_tts_command(self, action):
+        try:
+            os.makedirs("Data", exist_ok=True)
+            payload = {"action": action, "ts": time.time()}
+            tmp_path = TTS_COMMAND_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp_path, TTS_COMMAND_FILE)
+        except Exception:
+            pass
+
+    def check_tts_status(self):
+        if not os.path.exists(TTS_STATUS_FILE):
+            return
+
+        data = None
+        for _ in range(3):
+            try:
+                with open(TTS_STATUS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                break
+            except Exception:
+                time.sleep(0.004)
+
+        if not data:
+            return
+
+        speaking = bool(data.get("speaking", False))
+        text = str(data.get("text", ""))
+
+        self.tts_last_text = text
+
+        if speaking != self.tts_is_speaking:
+            was_speaking = self.tts_is_speaking
+            self.tts_is_speaking = speaking
+            self.speak_btn.set_speaking(speaking)
+
+            if speaking and not was_speaking:
+                self._word_sync_data = None
+                self._word_char_spans = None
+                self._word_sync_sentence_id = -1
+                self._current_highlight_idx = -1
+                if not self._word_highlight_timer.isActive():
+                    self._word_highlight_timer.start()
+            elif not speaking and was_speaking:
+                self._word_highlight_timer.stop()
+                self._word_sync_data = None
+                self._word_char_spans = None
+                self._word_sync_sentence_id = -1
+                self._current_highlight_idx = -1
+                self._clear_word_highlight()
+
+        self.speak_btn.set_has_content(bool(text.strip()))
+
+    def _poll_word_sync(self):
+        if not self.tts_is_speaking:
+            return
+        if not os.path.exists(TTS_WORD_SYNC_FILE):
+            return
+
+        data = None
+        for _ in range(2):
+            try:
+                with open(TTS_WORD_SYNC_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                break
+            except Exception:
+                time.sleep(0.003)
+
+        if not data:
+            return
+
+        if not data.get("active", False):
+            if self._word_sync_data is not None:
+                self._word_sync_data = None
+                self._word_char_spans = None
+                self._word_sync_sentence_id = -1
+                self._current_highlight_idx = -1
+                self._clear_word_highlight()
+            return
+
+        sid = int(data.get("sentence_id", -1))
+        if sid == self._word_sync_sentence_id:
+            return
+
+        self._word_sync_sentence_id = sid
+        self._word_sync_data = data
+        sentence = str(data.get("sentence", ""))
+        words = data.get("words", [])
+        self._word_char_spans = self._build_word_char_spans(sentence, words)
+        self._current_highlight_idx = -1
+
+    def _find_word_boundary(self, text, word, start):
+        if not word:
+            return -1
+        lower_text = text.lower()
+        lower_word = word.lower()
+        w_len = len(word)
+        idx = lower_text.find(lower_word, start)
+        while idx >= 0:
+            left_ok = idx == 0 or not text[idx - 1].isalnum()
+            right_pos = idx + w_len
+            right_ok = right_pos >= len(text) or not text[right_pos].isalnum()
+            if left_ok and right_ok:
+                return idx
+            idx = lower_text.find(lower_word, idx + 1)
+        return -1
+
+    def _find_sentence_offset(self, plain, sentence):
+        if not sentence:
+            return -1
+        idx = plain.find(sentence)
+        if idx >= 0:
+            return idx
+        for n in (40, 30, 20, 12):
+            if len(sentence) < n:
+                continue
+            prefix = sentence[:n]
+            idx = plain.find(prefix)
+            if idx >= 0:
+                return idx
+        words = sentence.split()[:5]
+        for k in (5, 4, 3):
+            if len(words) < k:
+                continue
+            prefix = " ".join(words[:k])
+            idx = plain.find(prefix)
+            if idx >= 0:
+                return idx
+        return -1
+
+    def _build_word_char_spans(self, sentence, words):
+        if not sentence or not words:
+            return None
+        if self._cached_plain_text is None:
+            try:
+                self._cached_plain_text = self.text_browser.toPlainText()
+            except Exception:
+                self._cached_plain_text = ""
+        plain = self._cached_plain_text
+        if not plain:
+            return None
+        offset = self._find_sentence_offset(plain, sentence)
+        if offset < 0:
+            return None
+        spans = [None] * len(words)
+        pos = offset
+        for i, w_obj in enumerate(words):
+            w_text = str(w_obj.get("w", "")).strip()
+            if not w_text:
+                continue
+            found = self._find_word_boundary(plain, w_text, pos)
+            matched_len = len(w_text)
+            if found < 0:
+                stripped = w_text.strip(".,!?;:\"'()[]{}…")
+                if stripped and stripped != w_text:
+                    found = self._find_word_boundary(plain, stripped, pos)
+                    matched_len = len(stripped)
+            if found >= 0:
+                spans[i] = (found, found + matched_len)
+                pos = found + matched_len
+        return spans if any(s is not None for s in spans) else None
+
+    def _tick_word_highlight(self):
+        if not self.tts_is_speaking or self._word_sync_data is None:
+            return
+        spans = self._word_char_spans
+        if spans is None:
+            return
+        words = self._word_sync_data.get("words", [])
+        if not words or len(spans) != len(words):
+            return
+        start_ts = float(self._word_sync_data.get("audio_start_ts", 0))
+        duration = float(self._word_sync_data.get("duration", 0))
+        elapsed = time.time() - start_ts
+        if elapsed < 0:
+            return
+        if elapsed > duration + 0.25:
+            if self._current_highlight_idx != -1:
+                self._current_highlight_idx = -1
+                self._clear_word_highlight()
+            return
+        idx = -1
+        for i in range(len(words) - 1, -1, -1):
+            if float(words[i].get("s", 0)) <= elapsed:
+                idx = i
+                break
+        if idx == self._current_highlight_idx:
+            return
+        self._current_highlight_idx = idx
+        if idx < 0 or spans[idx] is None:
+            self._clear_word_highlight()
+            return
+        span = spans[idx]
+        try:
+            doc = self.text_browser.document()
+            if doc is None:
+                return
+            cursor = QTextCursor(doc)
+            cursor.setPosition(span[0])
+            cursor.setPosition(span[1], QTextCursor.KeepAnchor)
+            fmt = QTextCharFormat()
+            r, g, b = [max(0, min(255, int(c))) for c in self.current_rgb]
+            fmt.setBackground(QColor(r, g, b, 95))
+            fmt.setForeground(QColor(255, 255, 255, 255))
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format = fmt
+            self.text_browser.setExtraSelections([sel])
+        except Exception:
+            pass
+
+    def _clear_word_highlight(self):
+        self._current_highlight_idx = -1
+        try:
+            if self.text_browser is not None:
+                self.text_browser.setExtraSelections([])
+        except Exception:
+            pass
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
@@ -529,6 +972,12 @@ class TypingPopup(QWidget):
         self.anim_group.start()
 
     def on_status_file_changed(self, path):
+        if os.path.basename(path) == os.path.basename(TTS_STATUS_FILE):
+            QTimer.singleShot(8, self.check_tts_status)
+            if os.path.exists(TTS_STATUS_FILE) and TTS_STATUS_FILE not in self.file_watcher.files():
+                self.file_watcher.addPath(TTS_STATUS_FILE)
+            return
+
         QTimer.singleShot(8, self.check_status_file)
         if os.path.exists(TYPING_STATUS_FILE) and TYPING_STATUS_FILE not in self.file_watcher.files():
             self.file_watcher.addPath(TYPING_STATUS_FILE)
@@ -611,6 +1060,11 @@ class TypingPopup(QWidget):
 
         self.text_browser.setUpdatesEnabled(False)
         self.text_browser.setHtml(final_html)
+        self._cached_plain_text = None
+        self._word_char_spans = None
+        self._word_sync_sentence_id = -1
+        self._current_highlight_idx = -1
+        self._clear_word_highlight()
         self.update_layout_height()
 
         if was_at_bottom:
@@ -633,6 +1087,16 @@ class TypingPopup(QWidget):
                         self.check_status_file()
             except Exception:
                 pass
+
+        self._tts_poll_counter += 1
+        if self._tts_poll_counter >= 10:
+            self._tts_poll_counter = 0
+            self.check_tts_status()
+
+        self._word_sync_poll_counter += 1
+        if self._word_sync_poll_counter >= 5:
+            self._word_sync_poll_counter = 0
+            self._poll_word_sync()
 
         scrollbar = self.text_browser.verticalScrollBar()
         cur_v = scrollbar.value()
@@ -680,6 +1144,7 @@ class TypingPopup(QWidget):
             self.current_rgb[i] += (self.target_rgb[i] - self.current_rgb[i]) * 0.14
 
         self.status_orb.set_state(self.current_rgb, self.glow_phase, self.status)
+        self.speak_btn.set_accent(self.current_rgb, self.glow_phase)
         self.container.update_visuals(self.current_rgb, self.glow_phase)
 
         if self.status == "completed" and not self.underMouse():
@@ -704,6 +1169,13 @@ class TypingPopup(QWidget):
         if not self.isVisible() or self.is_fading_out:
             return
         self.is_fading_out = True
+
+        if self.tts_is_speaking or self.speak_btn.speaking:
+            self._write_tts_command("stop")
+
+        self._word_highlight_timer.stop()
+        self._clear_word_highlight()
+
         self.master_timer.stop()
         self.parse_debounce_timer.stop()
 
