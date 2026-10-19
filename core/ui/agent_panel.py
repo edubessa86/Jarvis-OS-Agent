@@ -884,6 +884,7 @@ class AgentPanel(QWidget):
 
         self.user_width = self.DEFAULT_WIDTH
         self.user_height = self.DEFAULT_HEIGHT
+        self._user_resized = False
         self.MAX_THOUGHT_CHARS = 24000
 
         self._raw_detail_text = ""
@@ -1405,11 +1406,17 @@ class AgentPanel(QWidget):
             (self.awaiting_confirmation and self.preview_card.isVisible())
             or (self.obs_card.isVisible() and bool(self.obs_label.text().strip()))
         )
+        in_confirm = self.awaiting_confirmation and self.preview_card.isVisible()
 
         if not self._current_thought_text.strip():
             if has_extra_card:
                 self.thought_viewer.hide()
                 return 0
+            if self._user_resized and not in_confirm:
+                available_h = max(28, self.user_height - 116)
+                self.thought_viewer.show()
+                self.thought_viewer.setFixedHeight(available_h)
+                return available_h
             self.thought_viewer.show()
             self.thought_viewer.setFixedHeight(32)
             return 32
@@ -1420,12 +1427,18 @@ class AgentPanel(QWidget):
         doc.setTextWidth(avail_w)
         doc_h = int(math.ceil(doc.size().height())) + 4
 
-        if self.awaiting_confirmation and self.preview_card.isVisible():
+        if in_confirm:
             max_h = 88
+        elif self._user_resized:
+            max_h = max(28, self.user_height - 116)
         else:
             max_h = max(88, self.user_height - 106)
 
-        clamped_h = max(28, min(max_h, doc_h))
+        if self._user_resized and not in_confirm:
+            clamped_h = max(28, max_h)
+        else:
+            clamped_h = max(28, min(max_h, doc_h))
+
         self.thought_viewer.setFixedHeight(clamped_h)
         if not self.thought_viewer.user_scrolled_up:
             vbar = self.thought_viewer.verticalScrollBar()
@@ -1473,6 +1486,8 @@ class AgentPanel(QWidget):
                 y = start.bottom() - h + 1
             self.user_width = w
         else:
+            if "top" in self.resize_edge or "bottom" in self.resize_edge:
+                self._user_resized = True
             extra_h = self.get_extra_cards_height(w)
             min_total_h = self.MIN_HEIGHT + extra_h
             max_total_h = self.MAX_HEIGHT + extra_h
@@ -1500,6 +1515,7 @@ class AgentPanel(QWidget):
     def reset_to_default_size(self):
         self.user_width = self.DEFAULT_WIDTH
         self.user_height = self.DEFAULT_HEIGHT
+        self._user_resized = False
         new_geom = self.calculate_target_geometry()
         self.target_geometry = new_geom
         self.stop_active_geometry_animations()
