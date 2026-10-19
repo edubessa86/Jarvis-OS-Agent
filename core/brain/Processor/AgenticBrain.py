@@ -391,14 +391,19 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                         tool_calls = []
                         live_tokens = total_loop_tokens
                         chunk_counter = 0
+                        last_finish_reason = ""
                         for chunk in current_provider.generate_stream(
                             messages=messages,
                             tools=native_tools,
                             temperature=0.1,
-                            max_tokens=4096,
+                            max_tokens=16384,
                         ):
                             if chunk.get("error"):
                                 raise Exception(chunk["error"])
+
+                            fr = chunk.get("finish_reason", "")
+                            if fr:
+                                last_finish_reason = str(fr)
 
                             rc = chunk.get("reasoning_content", "")
                             if rc:
@@ -461,13 +466,14 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                             "reasoning_content": thought_text,
                             "tool_calls": tool_calls,
                             "error": None,
+                            "finish_reason": last_finish_reason,
                         }
                     else:
                         response = current_provider.generate(
                             messages=messages,
                             tools=native_tools,
                             temperature=0.1,
-                            max_tokens=4096,
+                            max_tokens=16384,
                             stream=False,
                         )
                         if response.get("error"):
@@ -499,6 +505,79 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                                 ai_response[func_name] = func_args
 
                     ai_response["thought"] = thought_text
+
+                    raw_content = response.get("content", "") or ""
+                    raw_finish_reason = str(response.get("finish_reason", "") or "").lower()
+                    raw_tool_calls = response.get("tool_calls", []) or []
+                    
+                    truncation_reasons = []
+                    
+                    if raw_finish_reason in ("length", "max_tokens", "token_limit"):
+                        truncation_reasons.append(f"finish_reason={raw_finish_reason}")
+                    
+                    for tc in raw_tool_calls:
+                        if not isinstance(tc, dict):
+                            continue
+                        func_block = tc.get("function")
+                        if not isinstance(func_block, dict):
+                            continue
+                        tc_name = func_block.get("name", "?")
+                        tc_args = func_block.get("arguments", "")
+                        if isinstance(tc_args, dict):
+                            if not tc_args:
+                                truncation_reasons.append(
+                                    f"tool_call '{tc_name}' has EMPTY dict args — server returned unparsed args"
+                                )
+                            continue
+                        if not isinstance(tc_args, str):
+                            truncation_reasons.append(
+                                f"tool_call '{tc_name}' args non-string type={type(tc_args).__name__}"
+                            )
+                            continue
+                        stripped_args = tc_args.strip()
+                        if stripped_args in ("", "{}", "null", "None"):
+                            truncation_reasons.append(
+                                f"tool_call '{tc_name}' has EMPTY/void args (len={len(tc_args)}) — likely truncated upstream"
+                            )
+                            continue
+                        if not stripped_args.endswith("}"):
+                            truncation_reasons.append(
+                                f"tool_call '{tc_name}' args not closed (len={len(tc_args)})"
+                            )
+                        try:
+                            json.loads(tc_args)
+                        except json.JSONDecodeError as jde:
+                            truncation_reasons.append(
+                                f"tool_call '{tc_name}' JSON invalid: {jde}"
+                            )
+                    
+                    if raw_content.strip():
+                        lower_raw = raw_content.lower()
+                        text_markers = [
+                            "unterminated string",
+                            "json decode failed",
+                            "json decode error",
+                            "failed to parse tool arguments",
+                            "output was truncated",
+                            "max_tokens",
+                        ]
+                        for marker in text_markers:
+                            if marker in lower_raw:
+                                truncation_reasons.append(f"text_marker='{marker}'")
+                                break
+                    
+                    if truncation_reasons:
+                        ai_response["_truncation_detected"] = True
+                        ai_response["_truncation_reasons"] = truncation_reasons
+                        ai_response.pop("is_task_complete", None)
+                        ai_response.pop("response", None)
+                        for k in list(ai_response.keys()):
+                            if k not in ("thought", "_truncation_detected", "_truncation_reasons"):
+                                ai_response.pop(k, None)
+                        logger.warning(
+                            f"🚨 TRUNCATION DETECTED | reasons={truncation_reasons} | "
+                            f"content_chars={len(raw_content)} | tool_calls={len(raw_tool_calls)}"
+                        )
 
                     break
 
@@ -542,7 +621,41 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                 f"🧠 Agent Thought: {ai_response.get('thought', 'Thinking...')}"
             )
 
-            ignore_keys = ["thought", "is_task_complete", "response"]
+            if ai_response.get("_truncation_detected"):
+                reasons_list = ai_response.get("_truncation_reasons", ["unknown"])
+                reasons_str = "\n".join([f"  - {r}" for r in reasons_list])
+                truncation_observation = (
+                    "Observation: [CRITICAL - OUTPUT TRUNCATION DETECTED]\n"
+                    "The LLM server physically stopped your output before it finished. This is a "
+                    "SERVER-SIDE truncation, NOT a syntax error, NOT a missing parameter, NOT a logic error.\n\n"
+                    f"EXACT SERVER-SIDE SIGNALS (ground truth, no interpretation):\n{reasons_str}\n\n"
+                    "CONSEQUENCES:\n"
+                    "- Any partial JSON tool arguments were discarded (no tool ran).\n"
+                    "- Any 'Unknown file action None' or 'Invalid JSON' error you saw was a SYMPTOM of "
+                    "this truncation, not a separate bug.\n"
+                    "- Triple-quoted strings (''' or \"\"\") inside generated code were left UNCLOSED.\n\n"
+                    "MANDATORY NEXT ACTION:\n"
+                    "1. NEVER retry the same large tool call. It will truncate again.\n"
+                    "2. Reduce TOTAL tool call size to < 2500 characters this turn.\n"
+                    "3. For multi-file projects: ONE file per step, max 50 lines each, minimal skeleton only.\n"
+                    "4. NEVER use triple-quoted strings for HTML/CSS/JS content. Use file_operations 'create' "
+                    "with short single-file content.\n"
+                    "5. If ONE file alone exceeds 2500 chars, split it across multiple steps using "
+                    "'replace_block' to append pieces.\n"
+                )
+                scratchpad += f"""
+<Step number="{step+1}">
+  <Thought>{ai_response.get('thought', 'Output truncated by server.')}</Thought>
+  <Executed_Tool>NONE (LLM output was truncated before tool call completed)</Executed_Tool>
+  <Result>{truncation_observation}</Result>
+</Step>
+"""
+                logger.warning("🚨 Truncation observation injected. Forcing agent to reduce output size on next attempt.")
+                step += 1
+                time.sleep(1.0)
+                continue
+
+            ignore_keys = ["thought", "is_task_complete", "response", "_truncation_detected", "_truncation_reasons"]
             executed_tools = []
             action_details_list = []
 

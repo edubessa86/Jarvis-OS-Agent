@@ -107,11 +107,11 @@ class RegoloProvider(BaseLLMProvider):
             logger.error(f"❌ Error converting tools for Regolo: {e}")
             return []
     
-    def _safe_parse_arguments(self, raw_args: Any) -> Dict[str, Any]:
+    def _safe_parse_arguments(self, raw_args: Any) -> Any:
         if isinstance(raw_args, dict):
             return raw_args
         if not isinstance(raw_args, str) or not raw_args.strip():
-            return {}
+            return raw_args if isinstance(raw_args, str) else ""
         try:
             return json.loads(raw_args)
         except Exception as e:
@@ -128,8 +128,11 @@ class RegoloProvider(BaseLLMProvider):
                         repaired += '}'
                     return json.loads(repaired)
                 except Exception:
-                    logger.error("❌ Failed to parse tool arguments completely after emergency repair.")
-                    return {}
+                    logger.error(
+                        f"❌ Failed to parse tool arguments after all repairs. "
+                        f"Returning RAW string (len={len(raw_args)}) so AgenticBrain can detect truncation."
+                    )
+                    return raw_args
 
     def generate(
         self,
@@ -157,7 +160,7 @@ class RegoloProvider(BaseLLMProvider):
                 "stream": stream,
                 "reasoning": {
                     "enabled": self.thinking_enabled,
-                    "max_tokens": 4096
+                    "max_tokens":  16384
                 }
             }
             
@@ -189,12 +192,21 @@ class RegoloProvider(BaseLLMProvider):
                         }
                     })
                 
+                finish_reason = ""
+                try:
+                    fr_raw = data["choices"][0].get("finish_reason")
+                    if fr_raw:
+                        finish_reason = str(fr_raw)
+                except Exception:
+                    finish_reason = ""
+                
                 return {
                     "content": content,
                     "reasoning_content": reasoning_content,
                     "tool_calls": formatted_tool_calls,
                     "provider": "regolo",
-                    "error": None
+                    "error": None,
+                    "finish_reason": finish_reason
                 }
             else:
                 error_text = response.text
@@ -242,7 +254,7 @@ class RegoloProvider(BaseLLMProvider):
                 "stream": True,
                 "reasoning": {
                     "enabled": self.thinking_enabled,
-                    "max_tokens": 4096
+                    "max_tokens":  16384
                 }
             }
             
@@ -259,6 +271,7 @@ class RegoloProvider(BaseLLMProvider):
             )
             
             accumulated_tool_calls = {}
+            last_finish_reason = ""
 
             if response.status_code == 200:
                 for line in response.iter_lines():
@@ -270,7 +283,12 @@ class RegoloProvider(BaseLLMProvider):
                                 try:
                                     chunk = json.loads(data)
                                     if chunk.get('choices'):
-                                        delta = chunk['choices'][0].get('delta', {})
+                                        choice = chunk['choices'][0]
+                                        fr = choice.get('finish_reason')
+                                        if fr:
+                                            last_finish_reason = str(fr)
+                                        
+                                        delta = choice.get('delta', {})
                                         
                                         rc = delta.get('reasoning_content') or delta.get('reasoning')
                                         if rc:
@@ -320,7 +338,17 @@ class RegoloProvider(BaseLLMProvider):
                         "reasoning_content": "",
                         "tool_calls": formatted_tool_calls,
                         "provider": "regolo",
-                        "error": None
+                        "error": None,
+                        "finish_reason": last_finish_reason
+                    }
+                else:
+                    yield {
+                        "content": "",
+                        "reasoning_content": "",
+                        "tool_calls": [],
+                        "provider": "regolo",
+                        "error": None,
+                        "finish_reason": last_finish_reason
                     }
             else:
                 yield {

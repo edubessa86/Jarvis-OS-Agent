@@ -309,7 +309,26 @@ def handle_python_code(python_cmd: dict) -> str:
     if not code:
         return "[ERROR] Python command missing 'code_string' parameter."
     logger.info("🤖 Agent executing Python Script.")
-    return run_python_code(code)
+    result = run_python_code(code)
+    result_str = str(result)
+    lower_result = result_str.lower()
+    truncation_signatures = (
+        "unterminated string",
+        "unexpected eof",
+        "eof while scanning",
+        "unexpected end of",
+        "syntaxerror: unexpected end",
+    )
+    if any(sig in lower_result for sig in truncation_signatures):
+        result_str += (
+            "\n\n[EXACT SIGNAL FROM EXECUTOR — NO HALLUCINATION]: The generated .py file has "
+            "an UNCLOSED string/block, which means your code_string was TRUNCATED by the LLM "
+            "server before the closing quotes/brackets were generated. This is NOT a Python "
+            "syntax bug in your logic. THIS IS SERVER-SIDE TRUNCATION.\n"
+            "FIX: Reduce next code_string to < 2500 chars, or use file_operations 'create' "
+            "to write ONE file per step instead of embedding HTML/CSS inside a Python triple-quoted string."
+        )
+    return result_str
 
 @with_observation
 def handle_mobile_action(mobile_cmd: dict) -> str:
@@ -839,7 +858,16 @@ def handle_file_operations(file_ops: dict) -> str:
             content=content,
             files=files
         )
-    return f"[ERROR] Unknown file action '{action}'. Supported: repo_map, view, replace_block, create."
+    hint = ""
+    if action is None and (file_ops.get("files") or file_ops.get("content") or file_ops.get("file_path")):
+        hint = (
+            "\n\n[EXACT SIGNAL FROM EXECUTOR — NO HALLUCINATION]: You sent file content but "
+            "the 'action' field is MISSING from the tool arguments. The incoming JSON was "
+            "truncated by the LLM server before the 'action' key could be generated. "
+            "THIS IS SERVER-SIDE TRUNCATION, not a missing parameter.\n"
+            "FIX: Reduce your next tool call payload to < 2500 chars. Create ONE file per step."
+        )
+    return f"[ERROR] Unknown file action '{action}'. Supported: repo_map, view, replace_block, create.{hint}"
 
 @with_observation
 def handle_clipboard_action(clipboard_cmd: dict) -> str:

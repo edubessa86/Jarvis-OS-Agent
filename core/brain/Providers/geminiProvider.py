@@ -76,11 +76,19 @@ class GeminiProvider(BaseLLMProvider):
                             }
                         })
             
+            finish_reason = ""
+            try:
+                if response.candidates and response.candidates[0].finish_reason:
+                    finish_reason = str(response.candidates[0].finish_reason.name)
+            except Exception:
+                finish_reason = ""
+            
             return {
                 "content": content_text,
                 "tool_calls": tool_calls,
                 "provider": "gemini",
-                "error": None
+                "error": None,
+                "finish_reason": finish_reason
             }
             
         except Exception as e:
@@ -129,28 +137,45 @@ class GeminiProvider(BaseLLMProvider):
                 config=config
             )
             
+            last_finish_reason = ""
             for chunk in response:
-                if chunk.candidates and chunk.candidates[0].content.parts:
-                    for part in chunk.candidates[0].content.parts:
-                        if part.text:
-                            yield {
-                                "content": part.text,
-                                "tool_calls": [],
-                                "provider": "gemini",
-                                "error": None
-                            }
-                        elif part.function_call:
-                            yield {
-                                "content": "",
-                                "tool_calls": [{
-                                    "function": {
-                                        "name": part.function_call.name,
-                                        "arguments": dict(part.function_call.args) if part.function_call.args else {}
-                                    }
-                                }],
-                                "provider": "gemini",
-                                "error": None
-                            }
+                if chunk.candidates:
+                    try:
+                        fr = chunk.candidates[0].finish_reason
+                        if fr:
+                            last_finish_reason = str(fr.name)
+                    except Exception:
+                        pass
+                    
+                    if chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                        for part in chunk.candidates[0].content.parts:
+                            if part.text:
+                                yield {
+                                    "content": part.text,
+                                    "tool_calls": [],
+                                    "provider": "gemini",
+                                    "error": None
+                                }
+                            elif part.function_call:
+                                yield {
+                                    "content": "",
+                                    "tool_calls": [{
+                                        "function": {
+                                            "name": part.function_call.name,
+                                            "arguments": dict(part.function_call.args) if part.function_call.args else {}
+                                        }
+                                    }],
+                                    "provider": "gemini",
+                                    "error": None
+                                }
+            
+            yield {
+                "content": "",
+                "tool_calls": [],
+                "provider": "gemini",
+                "error": None,
+                "finish_reason": last_finish_reason
+            }
                             
         except Exception as e:
             logger.error(f"❌ GeminiProvider stream error: {e}")
