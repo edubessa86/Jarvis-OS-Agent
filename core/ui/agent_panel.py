@@ -4,6 +4,7 @@ import os
 import re
 import math
 import queue
+import html
 import zmq
 
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false;qt.text.font.db=false;default.warning=false"
@@ -12,15 +13,16 @@ from PyQt5.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
     QPoint, QPointF, QRect, QRectF, QParallelAnimationGroup,
     pyqtProperty, QSize, qInstallMessageHandler,
-    QThread, pyqtSignal
+    QThread, pyqtSignal, QEvent
 )
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QApplication,
-    QFrame, QSizePolicy, QScrollArea, QPushButton, QTextEdit, QLineEdit
+    QFrame, QSizePolicy, QPushButton, QTextEdit, QLineEdit,
+    QTextBrowser
 )
 from PyQt5.QtGui import (
     QFont, QColor, QFontDatabase, QFontMetrics,
-    QPainter, QLinearGradient, QRadialGradient, QPen, QPainterPath
+    QPainter, QLinearGradient, QRadialGradient, QPen, QPainterPath, QCursor
 )
 
 
@@ -32,12 +34,378 @@ def qt_message_handler(mode, context, message):
     )
     if any(s in message for s in suppressed):
         return
+    if sys.__stderr__ is not None:
+        sys.__stderr__.write(f"{message}\n")
 
 
 qInstallMessageHandler(qt_message_handler)
 
 
-qInstallMessageHandler(qt_message_handler)
+PREMIUM_SINGLE_LINE_SCROLLBAR_CSS = """
+    QScrollBar:vertical {
+        background: rgba(255, 255, 255, 0.06);
+        width: 2px;
+        margin: 4px 1px 4px 1px;
+        border-radius: 1px;
+    }
+    QScrollBar::handle:vertical {
+        background: rgba(255, 255, 255, 0.38);
+        border-radius: 1px;
+        min-height: 24px;
+    }
+    QScrollBar::handle:vertical:hover {
+        background: rgba(255, 255, 255, 0.75);
+    }
+    QScrollBar::handle:vertical:pressed {
+        background: rgba(255, 255, 255, 0.95);
+    }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+        width: 0px;
+        background: none;
+    }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: none;
+    }
+"""
+
+
+class MarkdownRenderer:
+    TOKEN_MASTER_RE = re.compile(
+        r'(?P<comment>#[^\n]*|//[^\n]*|/\*[\s\S]*?\*/)'
+        r'|(?P<string>"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\')'
+        r'|(?P<decorator>@[a-zA-Z_]\w*)'
+        r'|(?P<keyword>\b(?:def|class|return|if|elif|else|for|while|try|except|finally|with|as|import|from|pass|break|continue|and|or|not|in|is|lambda|yield|async|await|True|False|None|const|let|var|function|export|default|switch|case|new|this|typeof|interface|type|struct|enum|pub|fn|impl|use|mod|match|where|select|insert|update|delete|create|table|drop|alter|raise|global|nonlocal|del|assert)\b)'
+        r'|(?P<builtin>\b(?:self|cls|print|len|range|enumerate|zip|map|filter|int|str|float|list|dict|set|tuple|bool|super|open|isinstance|getattr|setattr|hasattr|Exception|ValueError|TypeError|KeyError|RuntimeError|console|window|document|Promise|JSON|Math|Object|Array)\b)'
+        r'|(?P<func>\b[a-zA-Z_]\w*(?=\s*\())'
+        r'|(?P<number>\b(?:0x[0-9a-fA-F]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b)'
+    )
+
+    CODE_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\n?(.*?)```", re.DOTALL)
+    INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+    BOLD_ITALIC_RE = re.compile(r"\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*")
+    BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|__(?=\S)(.+?)(?<=\S)__")
+    ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*|\s)(.+?)(?<!\*|\s)\*(?!\*)")
+    HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)$")
+    BULLET_RE = re.compile(r"^(\s*)[-*•]\s+(.+)$")
+    NUMBERED_RE = re.compile(r"^(\s*)(\d+)\.\s+(.+)$")
+    LONG_TOKEN_RE = re.compile(r"\S{65,}")
+
+    @classmethod
+    def _soft_wrap_long_tokens(cls, text: str) -> str:
+        def inject_zwsp(match):
+            s = match.group(0)
+            return "\u200b".join(s[i:i + 45] for i in range(0, len(s), 45))
+        return cls.LONG_TOKEN_RE.sub(inject_zwsp, text)
+
+    @classmethod
+    def auto_heal_markdown(cls, text: str) -> str:
+        fence_count = len(re.findall(r"```", text))
+        if fence_count % 2 != 0:
+            text = text + "\n```"
+        return text
+
+    @classmethod
+    def highlight_code(cls, code: str) -> str:
+        result = []
+        last_idx = 0
+        color_map = {
+            "comment": "color: #7E88A6; font-style: italic;",
+            "string": "color: #F1FA8C;",
+            "decorator": "color: #50FA7B;",
+            "keyword": "color: #FF79C6; font-weight: bold;",
+            "builtin": "color: #8BE9FD; font-style: italic;",
+            "func": "color: #50FA7B;",
+            "number": "color: #BD93F9;",
+        }
+
+        for match in cls.TOKEN_MASTER_RE.finditer(code):
+            start, end = match.span()
+            if start > last_idx:
+                chunk = cls._soft_wrap_long_tokens(code[last_idx:start])
+                result.append(html.escape(chunk))
+            group_name = match.lastgroup
+            token_text = html.escape(cls._soft_wrap_long_tokens(match.group(0)))
+            style = color_map.get(group_name, "color: #F8F8F2;")
+            result.append(f'<span style="{style}">{token_text}</span>')
+            last_idx = end
+
+        if last_idx < len(code):
+            chunk = cls._soft_wrap_long_tokens(code[last_idx:])
+            result.append(html.escape(chunk))
+
+        highlighted = "".join(result)
+        highlighted = highlighted.replace("\t", "    ")
+        return highlighted
+
+    @classmethod
+    def format_inline(cls, text: str) -> str:
+        inline_vault = []
+
+        def save_inline_code(m):
+            idx = len(inline_vault)
+            code_content = html.escape(cls._soft_wrap_long_tokens(m.group(1)))
+            inline_vault.append(
+                f'<span style="background-color: rgba(255, 255, 255, 0.11); '
+                f'color: #FF79C6; font-family: \'Cascadia Code\', \'Consolas\', monospace; '
+                f'font-size: 9.5pt;">&nbsp;{code_content}&nbsp;</span>'
+            )
+            return f"@@INLINECODE_{idx}@@"
+
+        processed = cls.INLINE_CODE_RE.sub(save_inline_code, text)
+        processed = html.escape(cls._soft_wrap_long_tokens(processed))
+
+        processed = cls.BOLD_ITALIC_RE.sub(
+            r'<b style="color: #FFFFFF;"><i>\1</i></b>', processed
+        )
+        processed = cls.BOLD_RE.sub(
+            lambda m: f'<b style="color: #FFFFFF;">{m.group(1) or m.group(2)}</b>',
+            processed
+        )
+        processed = cls.ITALIC_RE.sub(
+            r'<i style="color: rgba(235, 235, 250, 0.92);">\1</i>', processed
+        )
+
+        for idx, badge_html in enumerate(inline_vault):
+            processed = processed.replace(f"@@INLINECODE_{idx}@@", badge_html)
+
+        return processed
+
+    @classmethod
+    def to_html(cls, raw_text: str, font_family: str, base_pt: int, accent_rgb: list) -> str:
+        if not raw_text.strip():
+            return ""
+
+        clean = raw_text.strip()
+        r, g, b = [max(0, min(255, int(c))) for c in accent_rgb]
+        accent_hex = f"rgb({r}, {g}, {b})"
+
+        healed = cls.auto_heal_markdown(clean)
+        code_blocks = []
+
+        def extract_code_block(match):
+            lang = (match.group(1) or "code").strip().upper()
+            raw_code = match.group(2).rstrip("\n")
+            highlighted = cls.highlight_code(raw_code)
+            block_html = (
+                f'<table width="100%" cellspacing="0" cellpadding="0" '
+                f'style="margin-top: 6px; margin-bottom: 6px; table-layout: fixed; '
+                f'background-color: rgba(8, 9, 14, 0.82); '
+                f'border: 1px solid rgba(255, 255, 255, 0.12);">'
+                f'<tr><td style="background-color: rgba(255, 255, 255, 0.06); '
+                f'padding: 3px 10px;">'
+                f'<span style="font-family: \'Segoe UI\', sans-serif; font-size: 7.5pt; '
+                f'font-weight: bold; color: {accent_hex}; letter-spacing: 0.8px;">{html.escape(lang)}</span>'
+                f'</td></tr>'
+                f'<tr><td style="padding: 8px 10px; word-wrap: break-word;">'
+                f'<pre style="margin: 0px; font-family: \'Cascadia Code\', \'Consolas\', \'Courier New\', monospace; '
+                f'font-size: 9.5pt; color: #F8F8F2; white-space: pre-wrap; word-wrap: break-word;">{highlighted}</pre>'
+                f'</td></tr></table>'
+            )
+            idx = len(code_blocks)
+            code_blocks.append(block_html)
+            return f"@@CODEBLOCK_{idx}@@"
+
+        staged = cls.CODE_BLOCK_RE.sub(extract_code_block, healed)
+        lines = staged.split("\n")
+        out_lines = []
+        body_pt = max(10, base_pt - 1)
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("@@CODEBLOCK_") and stripped.endswith("@@"):
+                idx_str = stripped.replace("@@CODEBLOCK_", "").replace("@@", "")
+                if idx_str.isdigit() and int(idx_str) < len(code_blocks):
+                    out_lines.append(code_blocks[int(idx_str)])
+                continue
+
+            if not stripped:
+                out_lines.append('<div style="height: 5px; font-size: 1pt;">&nbsp;</div>')
+                continue
+
+            if stripped in ("---", "***", "___"):
+                out_lines.append(
+                    '<hr style="border: none; background-color: rgba(255, 255, 255, 0.12); height: 1px; margin: 6px 0px;" />'
+                )
+                continue
+
+            h_match = cls.HEADING_RE.match(stripped)
+            if h_match:
+                level = len(h_match.group(1))
+                h_text = cls.format_inline(h_match.group(2))
+                h_size = max(body_pt, body_pt + (3 - level))
+                h_color = "#FFFFFF" if level <= 2 else "#8BE9FD"
+                out_lines.append(
+                    f'<div style="margin-top: 6px; margin-bottom: 3px; font-size: {h_size}pt; '
+                    f'font-weight: bold; color: {h_color};">{h_text}</div>'
+                )
+                continue
+
+            if stripped.startswith(">"):
+                q_text = cls.format_inline(stripped.lstrip(">").strip())
+                out_lines.append(
+                    f'<div style="margin: 3px 0px 3px 8px; color: rgba(210, 214, 235, 0.85); '
+                    f'font-style: italic;"><span style="color: {accent_hex}; font-weight: bold;">▎ </span>{q_text}</div>'
+                )
+                continue
+
+            b_match = cls.BULLET_RE.match(line)
+            if b_match:
+                indent_px = 6 + min(36, len(b_match.group(1)) * 6)
+                b_text = cls.format_inline(b_match.group(2))
+                out_lines.append(
+                    f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
+                    f'<span style="color: {accent_hex}; font-weight: bold;">•&nbsp;</span>{b_text}</div>'
+                )
+                continue
+
+            n_match = cls.NUMBERED_RE.match(line)
+            if n_match:
+                indent_px = 6 + min(36, len(n_match.group(1)) * 6)
+                num_str = n_match.group(2)
+                n_text = cls.format_inline(n_match.group(3))
+                out_lines.append(
+                    f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
+                    f'<span style="color: {accent_hex}; font-weight: bold;">{num_str}.&nbsp;</span>{n_text}</div>'
+                )
+                continue
+
+            out_lines.append(
+                f'<div style="margin-top: 2px; margin-bottom: 2px; line-height: 1.40; word-wrap: break-word;">'
+                f'{cls.format_inline(line)}</div>'
+            )
+
+        body_html = "".join(out_lines)
+        return (
+            f'<div style="font-family: \'{font_family}\', \'Segoe UI\', sans-serif; '
+            f'font-size: {body_pt}pt; font-weight: 450; color: rgba(244, 244, 252, 0.95); '
+            f'text-align: left; padding-top: 2px;">{body_html}</div>'
+        )
+
+
+class ThoughtViewer(QTextBrowser):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.viewport().setCursor(Qt.ArrowCursor)
+        self.document().setDocumentMargin(4)
+
+        self.setStyleSheet("""
+            QTextBrowser {
+                background: transparent;
+                border: none;
+                padding: 2px 6px 2px 2px;
+            }
+        """ + PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
+
+        self.user_scrolled_up = False
+        self._updating_dom = False
+        self._last_raw_text = ""
+        self._last_rendered_html = ""
+        self._target_scroll_val = 0
+
+        vbar = self.verticalScrollBar()
+        self.smooth_scroll_anim = QPropertyAnimation(vbar, b"value", self)
+        self.smooth_scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.smooth_scroll_anim.setDuration(135)
+
+        vbar.sliderPressed.connect(self._on_user_slider_interaction)
+        vbar.valueChanged.connect(self._on_vbar_value_changed)
+
+    def _on_user_slider_interaction(self):
+        vbar = self.verticalScrollBar()
+        self.user_scrolled_up = vbar.value() < max(0, vbar.maximum() - 14)
+
+    def _on_vbar_value_changed(self, value):
+        if self._updating_dom:
+            return
+        vbar = self.verticalScrollBar()
+        if vbar.isSliderDown():
+            self.user_scrolled_up = value < max(0, vbar.maximum() - 14)
+
+    def reset_scroll_lock(self):
+        self.user_scrolled_up = False
+        self._target_scroll_val = 0
+
+    def wheelEvent(self, event):
+        vbar = self.verticalScrollBar()
+        if vbar.maximum() <= 0:
+            event.ignore()
+            return
+
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
+            event.accept()
+            return
+
+        step = int(-delta_y * 0.65)
+        base_val = (
+            self._target_scroll_val
+            if self.smooth_scroll_anim.state() == QPropertyAnimation.Running
+            else vbar.value()
+        )
+        new_target = max(vbar.minimum(), min(vbar.maximum(), base_val + step))
+        self._target_scroll_val = new_target
+
+        self.user_scrolled_up = new_target < max(0, vbar.maximum() - 14)
+
+        if self.smooth_scroll_anim.state() == QPropertyAnimation.Running:
+            self.smooth_scroll_anim.stop()
+        self.smooth_scroll_anim.setDuration(135)
+        self.smooth_scroll_anim.setStartValue(vbar.value())
+        self.smooth_scroll_anim.setEndValue(new_target)
+        self.smooth_scroll_anim.start()
+        event.accept()
+
+    def set_markdown_content(self, raw_text: str, font_family: str, base_pt: int, accent_rgb: list):
+        self._last_raw_text = raw_text
+        if not raw_text.strip():
+            self._updating_dom = True
+            self.clear()
+            self._last_rendered_html = ""
+            self._updating_dom = False
+            return
+
+        rendered_html = MarkdownRenderer.to_html(raw_text, font_family, base_pt, accent_rgb)
+        if rendered_html == self._last_rendered_html:
+            return
+
+        self._last_rendered_html = rendered_html
+        vbar = self.verticalScrollBar()
+        prev_val = vbar.value()
+        follow_bottom = not self.user_scrolled_up
+
+        if self.smooth_scroll_anim.state() == QPropertyAnimation.Running and follow_bottom:
+            self.smooth_scroll_anim.stop()
+
+        self._updating_dom = True
+        self.setUpdatesEnabled(False)
+        self.document().setHtml(rendered_html)
+
+        new_max = vbar.maximum()
+        if follow_bottom:
+            start_val = min(prev_val, new_max)
+            vbar.setValue(start_val)
+            self.setUpdatesEnabled(True)
+            self._updating_dom = False
+            self._target_scroll_val = new_max
+            if abs(new_max - start_val) <= 3:
+                vbar.setValue(new_max)
+            else:
+                self.smooth_scroll_anim.setDuration(95)
+                self.smooth_scroll_anim.setStartValue(start_val)
+                self.smooth_scroll_anim.setEndValue(new_max)
+                self.smooth_scroll_anim.start()
+        else:
+            vbar.setValue(min(prev_val, new_max))
+            self.setUpdatesEnabled(True)
+            self._updating_dom = False
 
 
 class AgentZmqListener(QThread):
@@ -47,14 +415,20 @@ class AgentZmqListener(QThread):
     def __init__(self):
         super().__init__()
         self.reply_queue = queue.Queue()
+        self._running = True
 
     def send_decision(self, payload: dict):
         self.reply_queue.put_nowait(payload)
+
+    def stop(self):
+        self._running = False
+        self.wait(1000)
 
     def run(self):
         context = zmq.Context()
 
         sub_socket = context.socket(zmq.SUB)
+        sub_socket.setsockopt(zmq.LINGER, 0)
         sub_socket.connect("tcp://127.0.0.1:5555")
         sub_socket.setsockopt_string(zmq.SUBSCRIBE, "AGENT_UPDATE")
 
@@ -66,8 +440,8 @@ class AgentZmqListener(QThread):
             confirm_pull.connect("tcp://127.0.0.1:5556")
 
         confirm_push = context.socket(zmq.PUSH)
-        confirm_push.setsockopt(zmq.LINGER, 1000)
-        confirm_push.setsockopt(zmq.SNDTIMEO, 500)
+        confirm_push.setsockopt(zmq.LINGER, 200)
+        confirm_push.setsockopt(zmq.SNDTIMEO, 300)
         try:
             confirm_push.bind("tcp://127.0.0.1:5557")
         except Exception:
@@ -77,7 +451,7 @@ class AgentZmqListener(QThread):
         poller.register(sub_socket, zmq.POLLIN)
         poller.register(confirm_pull, zmq.POLLIN)
 
-        while True:
+        while self._running:
             try:
                 while not self.reply_queue.empty():
                     reply_data = self.reply_queue.get_nowait()
@@ -92,7 +466,7 @@ class AgentZmqListener(QThread):
                 socks = dict(poller.poll(25))
 
                 if sub_socket in socks and socks[sub_socket] == zmq.POLLIN:
-                    while True:
+                    while self._running:
                         try:
                             message = sub_socket.recv_string(flags=zmq.NOBLOCK)
                             topic, json_data = message.split(" ", 1)
@@ -104,7 +478,7 @@ class AgentZmqListener(QThread):
                             break
 
                 if confirm_pull in socks and socks[confirm_pull] == zmq.POLLIN:
-                    while True:
+                    while self._running:
                         try:
                             confirm_data = confirm_pull.recv_json(flags=zmq.NOBLOCK)
                             self.confirmation_requested.emit(confirm_data)
@@ -114,6 +488,14 @@ class AgentZmqListener(QThread):
                             break
             except Exception:
                 pass
+
+        try:
+            sub_socket.close()
+            confirm_pull.close()
+            confirm_push.close()
+            context.term()
+        except Exception:
+            pass
 
 
 class StatusOrb(QWidget):
@@ -433,20 +815,61 @@ class ObservationCard(QFrame):
 
 
 class AgentPanel(QWidget):
+    COLOR_MAP = {
+        "search": [10, 132, 255],
+        "deep_task": [255, 55, 95],
+        "python": [48, 130, 200],
+        "thinking": [191, 90, 242],
+        "workspace": [255, 159, 10],
+        "communication": [48, 209, 88],
+        "confirm_whatsapp": [37, 211, 102],
+        "confirm_telegram": [0, 152, 234],
+        "confirm_email": [255, 159, 10],
+        "gui": [94, 92, 230],
+        "mobile": [0, 212, 178],
+        "file_transfer": [0, 180, 160],
+        "file_ops": [255, 214, 10],
+        "terminal": [50, 215, 75],
+        "memory": [175, 82, 222],
+        "calendar": [90, 200, 250],
+        "clipboard": [255, 100, 130],
+        "image_gen": [255, 45, 85],
+        "done": [48, 209, 88],
+        "idle": [110, 110, 120],
+    }
+
     def __init__(self):
         super().__init__()
-        qInstallMessageHandler(qt_message_handler)
 
         self.last_status = None
         self.current_step = -1
         self.last_tag_text = ""
         self.custom_pos = None
-        self.is_dragging = False
 
-        self.MIN_WIDTH = 580
-        self.MAX_WIDTH = 580
+        self.is_dragging = False
+        self.is_resizing = False
+        self.resize_edge = None
+        self.resize_start_mouse = QPoint()
+        self.resize_start_geom = QRect()
+        self._interaction_origin = None
+        self._override_cursor_active = False
+
+        self.DEFAULT_WIDTH = 580
         self.DEFAULT_HEIGHT = 196
-        self.MAX_THOUGHT_CHARS = 800
+        self.MIN_WIDTH = 440
+        self.MAX_WIDTH = 1280
+        self.MIN_HEIGHT = 160
+        self.MAX_HEIGHT = 860
+
+        self.user_width = self.DEFAULT_WIDTH
+        self.user_height = self.DEFAULT_HEIGHT
+        self.MAX_THOUGHT_CHARS = 24000
+
+        self._raw_detail_text = ""
+        self._raw_to_text = ""
+        self._raw_attachment_text = ""
+        self._current_thought_text = ""
+        self._pending_thought_text = None
 
         eng_id = QFontDatabase.addApplicationFont("Data/fonts/english.ttf")
         eng_fams = QFontDatabase.applicationFontFamilies(eng_id) if eng_id != -1 else []
@@ -454,7 +877,7 @@ class AgentPanel(QWidget):
 
         hin_id = QFontDatabase.addApplicationFont("Data/fonts/devangri.ttf")
         hin_fams = QFontDatabase.applicationFontFamilies(hin_id) if hin_id != -1 else []
-        self.font_hin = hin_fams[0] if hin_fams else "Nirmala UI"
+        self.font_hin = hin_fams[0] if hin_id != -1 and hin_fams else "Nirmala UI"
 
         fallback_chain = [self.font_hin, "Nirmala UI", "Segoe UI", "Mangal"]
         try:
@@ -471,36 +894,46 @@ class AgentPanel(QWidget):
         self.active_confirm_platform = ""
 
         self.current_rgb = [191.0, 90.0, 242.0]
-        self.target_rgb = [191.0, 90.0, 242.0]
+        self.target_rgb = [191, 90, 242]
 
         self.rgb_timer = QTimer(self)
         self.rgb_timer.timeout.connect(self.update_glow_effect)
 
-        self.scroll_timer = QTimer(self)
-        self.scroll_timer.setSingleShot(True)
-        self.scroll_timer.timeout.connect(self.snap_scroll_to_bottom)
+        self.thought_render_timer = QTimer(self)
+        self.thought_render_timer.setSingleShot(True)
+        self.thought_render_timer.setInterval(32)
+        self.thought_render_timer.timeout.connect(self.flush_pending_thought)
 
         self.target_geometry = None
         self.resize_anim = QPropertyAnimation(self, b"anim_geometry")
         self.resize_anim.setEasingCurve(QEasingCurve.OutQuint)
-        self.resize_anim.setDuration(220)
+        self.resize_anim.setDuration(210)
 
         self.initUI()
 
-        self.scroll_anim = QPropertyAnimation(self.thought_scroll.verticalScrollBar(), b"value", self)
-        self.scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self.scroll_anim.setDuration(95)
+        app = QApplication.instance()
+        app.installEventFilter(self)
+        app.aboutToQuit.connect(self._cleanup_resources)
 
         self.zmq_listener = AgentZmqListener()
         self.zmq_listener.status_received.connect(self.process_status_update)
         self.zmq_listener.confirmation_requested.connect(self.show_confirmation_preview)
         self.zmq_listener.start()
 
+    def _cleanup_resources(self):
+        self.clear_override_cursor()
+        if hasattr(self, "zmq_listener") and self.zmq_listener.isRunning():
+            self.zmq_listener.stop()
+
+    def closeEvent(self, event):
+        self._cleanup_resources()
+        super().closeEvent(event)
+
     def minimumSizeHint(self):
         return QSize(0, 0)
 
     def sizeHint(self):
-        return QSize(self.MIN_WIDTH, self.DEFAULT_HEIGHT)
+        return QSize(self.user_width, self.user_height)
 
     @pyqtProperty(QRect)
     def anim_geometry(self):
@@ -513,6 +946,7 @@ class AgentPanel(QWidget):
     def initUI(self):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setMouseTracking(True)
         self.setMinimumSize(0, 0)
         self.setStyleSheet("background: transparent; border: none; outline: none;")
 
@@ -522,6 +956,7 @@ class AgentPanel(QWidget):
 
         self.container = IslandContainer(self)
         self.container.setObjectName("IslandWrapper")
+        self.container.setMouseTracking(True)
         self.container.setMinimumSize(0, 0)
 
         self.wrapper_layout = QVBoxLayout(self.container)
@@ -530,6 +965,7 @@ class AgentPanel(QWidget):
 
         self.inner_island = QFrame(self.container)
         self.inner_island.setObjectName("Island")
+        self.inner_island.setMouseTracking(True)
         self.inner_island.setMinimumSize(0, 0)
         self.inner_island.setStyleSheet("background: transparent; border: none;")
         self.wrapper_layout.addWidget(self.inner_island)
@@ -611,33 +1047,12 @@ class AgentPanel(QWidget):
         header_layout.addWidget(self.meta_capsule)
         self.layout.addLayout(header_layout)
 
-        self.thought_scroll = QScrollArea()
-        self.thought_scroll.setWidgetResizable(True)
-        self.thought_scroll.setMinimumSize(0, 0)
-        self.thought_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.thought_scroll.setStyleSheet("background: transparent; border: none;")
-        self.thought_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.thought_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
-        self.thought_label = QLabel("")
-        self.thought_label.setMinimumSize(0, 0)
-        self.thought_label.setWordWrap(True)
-        self.thought_label.setAlignment(Qt.AlignCenter)
-
-        thought_font = QFont(self.font_eng, 12, QFont.Medium)
-        thought_font.setLetterSpacing(QFont.PercentageSpacing, 101)
-        self.thought_label.setFont(thought_font)
-        self.thought_label.setStyleSheet("""
-            QLabel {
-                color: rgba(248, 248, 255, 0.95);
-                border: none;
-                background: transparent;
-                padding: 4px 6px;
-            }
-        """)
-
-        self.thought_scroll.setWidget(self.thought_label)
-        self.layout.addWidget(self.thought_scroll, 1)
+        self.thought_viewer = ThoughtViewer(self.inner_island)
+        self.thought_viewer.setMinimumSize(0, 0)
+        self.thought_viewer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.thought_viewer.setMouseTracking(True)
+        self.thought_viewer.viewport().setMouseTracking(True)
+        self.layout.addWidget(self.thought_viewer, 1)
 
         self.separator = QFrame()
         self.separator.setMinimumSize(0, 1)
@@ -768,19 +1183,7 @@ class AgentPanel(QWidget):
                 border: 1px solid rgba(255, 255, 255, 0.28);
                 background-color: rgba(0, 0, 0, 0.50);
             }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 4px;
-                margin: 2px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(255, 255, 255, 0.22);
-                border-radius: 2px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-        """)
+        """ + PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
         self.preview_layout.addWidget(self.preview_body_edit)
 
         self.preview_attachment_label = QLabel("")
@@ -854,33 +1257,277 @@ class AgentPanel(QWidget):
         self.setCursor(Qt.ArrowCursor)
         self.hide()
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = True
-            self.setCursor(Qt.ClosedHandCursor)
-            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
-            if self.resize_anim.state() == QPropertyAnimation.Running:
-                self.resize_anim.stop()
-            if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
-                self.show_anim_group.stop()
-            event.accept()
+    def _resolve_mouse_coords(self, obj, event):
+        local_pos = event.pos() if obj is self else obj.mapTo(self, event.pos())
+        raw_global = event.globalPos()
+        if raw_global == event.pos():
+            origin = (
+                self._interaction_origin
+                if (self.is_dragging or self.is_resizing) and self._interaction_origin is not None
+                else self.geometry().topLeft()
+            )
+            if origin != QPoint(0, 0):
+                global_pos = origin + local_pos
+            else:
+                global_pos = raw_global
+        else:
+            global_pos = raw_global
+        return local_pos, global_pos
 
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.LeftButton and hasattr(self, "drag_position"):
-            new_pos = event.globalPos() - self.drag_position
-            self.custom_pos = new_pos
-            if self.resize_anim.state() == QPropertyAnimation.Running:
-                self.resize_anim.stop()
-            self.move(new_pos)
-            self.target_geometry = self.geometry()
-            event.accept()
+    def detect_resize_edge(self, local_pos: QPoint):
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return None
 
-    def mouseReleaseEvent(self, event):
-        self.setCursor(Qt.ArrowCursor)
-        self.is_dragging = False
-        if hasattr(self, "drag_position"):
-            del self.drag_position
-        event.accept()
+        ix1, iy1 = 23, 17
+        ix2, iy2 = w - 23, h - 23
+        grip = 9
+        corner_span = 22
+
+        x, y = local_pos.x(), local_pos.y()
+        if x < 0 or x > w or y < 0 or y > h:
+            return None
+
+        near_left = x <= ix1 + grip
+        near_right = x >= ix2 - grip
+        near_top = y <= iy1 + grip
+        near_bottom = y >= iy2 - grip
+
+        if not (near_left or near_right or near_top or near_bottom):
+            return None
+
+        in_left_corner = x <= ix1 + corner_span
+        in_right_corner = x >= ix2 - corner_span
+        in_top_corner = y <= iy1 + corner_span
+        in_bottom_corner = y >= iy2 - corner_span
+
+        if (near_top and in_left_corner) or (near_left and in_top_corner):
+            return "top_left"
+        if (near_top and in_right_corner) or (near_right and in_top_corner):
+            return "top_right"
+        if (near_bottom and in_left_corner) or (near_left and in_bottom_corner):
+            return "bottom_left"
+        if (near_bottom and in_right_corner) or (near_right and in_bottom_corner):
+            return "bottom_right"
+        if near_left:
+            return "left"
+        if near_right:
+            return "right"
+        if near_top:
+            return "top"
+        if near_bottom:
+            return "bottom"
+        return None
+
+    def set_override_cursor_shape(self, cursor_shape):
+        if cursor_shape is not None:
+            if self._override_cursor_active:
+                QApplication.changeOverrideCursor(cursor_shape)
+            else:
+                QApplication.setOverrideCursor(cursor_shape)
+                self._override_cursor_active = True
+        else:
+            self.clear_override_cursor()
+
+    def set_edge_cursor(self, edge):
+        cursor_map = {
+            "left": Qt.SizeHorCursor,
+            "right": Qt.SizeHorCursor,
+            "top": Qt.SizeVerCursor,
+            "bottom": Qt.SizeVerCursor,
+            "top_left": Qt.SizeFDiagCursor,
+            "bottom_right": Qt.SizeFDiagCursor,
+            "top_right": Qt.SizeBDiagCursor,
+            "bottom_left": Qt.SizeBDiagCursor,
+        }
+        self.set_override_cursor_shape(cursor_map.get(edge))
+
+    def clear_override_cursor(self):
+        if self._override_cursor_active:
+            QApplication.restoreOverrideCursor()
+            self._override_cursor_active = False
+
+    def is_interactive_child(self, widget):
+        interactive_widgets = (
+            self.cancel_btn,
+            self.send_btn,
+            self.preview_subject_input,
+            self.preview_body_edit,
+            self.preview_body_edit.viewport(),
+            self.thought_viewer.verticalScrollBar(),
+            self.preview_body_edit.verticalScrollBar(),
+        )
+        curr = widget
+        while curr is not None and curr is not self:
+            if curr in interactive_widgets:
+                return True
+            curr = curr.parentWidget()
+        return False
+
+    def stop_active_geometry_animations(self):
+        if self.resize_anim.state() == QPropertyAnimation.Running:
+            self.resize_anim.stop()
+        if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
+            self.show_anim_group.stop()
+
+    def get_extra_cards_height(self, for_width: int) -> int:
+        if self.awaiting_confirmation and self.preview_card.isVisible():
+            extra_height = 200
+            if self.preview_subject_input.isVisible():
+                extra_height += 38
+            if self.preview_attachment_label.isVisible():
+                extra_height += 30
+            return extra_height
+        if self.obs_card.isVisible() and self.obs_label.text().strip():
+            fm = QFontMetrics(self.obs_label.font())
+            avail_w = max(180, for_width - 108)
+            bound = fm.boundingRect(0, 0, avail_w, 300, Qt.TextWordWrap, self.obs_label.text())
+            obs_h = min(72, max(24, bound.height() + 4))
+            return obs_h + 34
+        return 0
+
+    def perform_interactive_resize(self, global_pos: QPoint):
+        delta = global_pos - self.resize_start_mouse
+        start = self.resize_start_geom
+        x, y, w, h = start.x(), start.y(), start.width(), start.height()
+
+        if "right" in self.resize_edge:
+            w = max(self.MIN_WIDTH, min(self.MAX_WIDTH, start.width() + delta.x()))
+        elif "left" in self.resize_edge:
+            w = max(self.MIN_WIDTH, min(self.MAX_WIDTH, start.width() - delta.x()))
+            x = start.right() - w + 1
+
+        extra_h = self.get_extra_cards_height(w)
+        min_total_h = self.MIN_HEIGHT + extra_h
+        max_total_h = self.MAX_HEIGHT + extra_h
+
+        if "bottom" in self.resize_edge:
+            h = max(min_total_h, min(max_total_h, start.height() + delta.y()))
+        elif "top" in self.resize_edge:
+            h = max(min_total_h, min(max_total_h, start.height() - delta.y()))
+            y = start.bottom() - h + 1
+
+        self.user_width = w
+        self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
+        self.custom_pos = QPoint(x, y)
+
+        new_rect = QRect(x, y, w, h)
+        self.target_geometry = new_rect
+        self.setGeometry(new_rect)
+        self.refresh_elided_labels()
+
+    def reset_to_default_size(self):
+        self.user_width = self.DEFAULT_WIDTH
+        self.user_height = self.DEFAULT_HEIGHT
+        new_geom = self.calculate_target_geometry()
+        self.target_geometry = new_geom
+        self.stop_active_geometry_animations()
+        self.resize_anim.setStartValue(self.geometry())
+        self.resize_anim.setEndValue(new_geom)
+        self.resize_anim.start()
+        self.refresh_elided_labels()
+
+    def eventFilter(self, obj, event):
+        if not self.isVisible() or not isinstance(obj, QWidget):
+            return super().eventFilter(obj, event)
+
+        if obj is not self and not self.isAncestorOf(obj):
+            return super().eventFilter(obj, event)
+
+        etype = event.type()
+
+        if etype == QEvent.MouseMove:
+            local_pos, global_pos = self._resolve_mouse_coords(obj, event)
+
+            if self.is_resizing:
+                self.perform_interactive_resize(global_pos)
+                return True
+
+            if self.is_dragging and hasattr(self, "drag_position"):
+                new_pos = global_pos - self.drag_position
+                self.custom_pos = new_pos
+                self.stop_active_geometry_animations()
+                self.move(new_pos)
+                self.target_geometry = self.geometry()
+                return True
+
+            if event.buttons() == Qt.NoButton:
+                if self.is_interactive_child(obj):
+                    self.clear_override_cursor()
+                else:
+                    edge = self.detect_resize_edge(local_pos)
+                    self.set_edge_cursor(edge)
+
+        elif etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._interaction_origin = self.geometry().topLeft()
+            local_pos, global_pos = self._resolve_mouse_coords(obj, event)
+            edge = None if self.is_interactive_child(obj) else self.detect_resize_edge(local_pos)
+
+            if edge is not None:
+                self.is_resizing = True
+                self.resize_edge = edge
+                self.resize_start_mouse = global_pos
+                self.resize_start_geom = self.geometry()
+                self.stop_active_geometry_animations()
+                self.set_edge_cursor(edge)
+                return True
+
+            if not self.is_interactive_child(obj):
+                self.is_dragging = True
+                self.drag_position = global_pos - self.geometry().topLeft()
+                self.stop_active_geometry_animations()
+                self.set_override_cursor_shape(Qt.ClosedHandCursor)
+                return True
+
+        elif etype == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            local_pos, _ = self._resolve_mouse_coords(obj, event)
+            if self.is_resizing:
+                self.is_resizing = False
+                self.resize_edge = None
+                self._interaction_origin = None
+                self.set_edge_cursor(self.detect_resize_edge(local_pos))
+                return True
+
+            if self.is_dragging:
+                self.is_dragging = False
+                self._interaction_origin = None
+                if hasattr(self, "drag_position"):
+                    del self.drag_position
+                self.set_edge_cursor(self.detect_resize_edge(local_pos))
+                return True
+
+        elif etype == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+            local_pos, _ = self._resolve_mouse_coords(obj, event)
+            if self.detect_resize_edge(local_pos) is None and not self.is_interactive_child(obj):
+                if local_pos.y() <= 62:
+                    self.reset_to_default_size()
+                    return True
+
+        elif etype == QEvent.Leave:
+            if not self.is_resizing and not self.is_dragging:
+                cursor_local = self.mapFromGlobal(QCursor.pos())
+                if not self.rect().contains(cursor_local):
+                    self.clear_override_cursor()
+
+        return super().eventFilter(obj, event)
+
+    def refresh_elided_labels(self):
+        curr_w = self.width() if self.width() > 0 else self.user_width
+
+        if self._raw_detail_text and self.detail_pill.isVisible():
+            fm = QFontMetrics(self.detail_pill.font())
+            max_detail_w = max(110, curr_w - 365)
+            self.detail_pill.setText(fm.elidedText(self._raw_detail_text, Qt.ElideRight, max_detail_w))
+
+        if self._raw_to_text and self.preview_card.isVisible():
+            fm_to = QFontMetrics(self.preview_to_label.font())
+            max_to_w = max(180, curr_w - 220)
+            self.preview_to_label.setText(fm_to.elidedText(self._raw_to_text, Qt.ElideRight, max_to_w))
+
+        if self._raw_attachment_text and self.preview_attachment_label.isVisible():
+            fm_att = QFontMetrics(self.preview_attachment_label.font())
+            max_att_w = max(220, curr_w - 120)
+            self.preview_attachment_label.setText(fm_att.elidedText(self._raw_attachment_text, Qt.ElideRight, max_att_w))
 
     def is_hindi(self, text):
         return bool(re.search(r"[\u0900-\u097F]", str(text)))
@@ -900,34 +1547,37 @@ class AgentPanel(QWidget):
             font.setLetterSpacing(QFont.PercentageSpacing, 101)
         widget.setFont(font)
 
+    def render_thought_now(self):
+        text = self._current_thought_text
+        stable_rgb = self.COLOR_MAP.get(self.current_action_type, [191, 90, 242])
+        if not text:
+            self.thought_viewer.set_markdown_content("", self.font_eng, 12, stable_rgb)
+            return
+        use_hin = self.is_hindi(text)
+        fam = self.font_hin if use_hin else self.font_eng
+        pt = 13 if use_hin else 12
+        self.thought_viewer.set_markdown_content(text, fam, pt, stable_rgb)
+
+    def schedule_thought_render(self, clean_thought: str):
+        if not self.thought_render_timer.isActive():
+            self._current_thought_text = clean_thought
+            self.render_thought_now()
+            self.thought_render_timer.start()
+        else:
+            self._pending_thought_text = clean_thought
+
+    def flush_pending_thought(self):
+        if self._pending_thought_text is not None:
+            self._current_thought_text = self._pending_thought_text
+            self._pending_thought_text = None
+            self.render_thought_now()
+
     def update_glow_effect(self):
         self.gradient_phase += 0.045
         if self.gradient_phase >= math.pi * 2:
             self.gradient_phase -= math.pi * 2
 
-        color_map = {
-            "search": [10, 132, 255],
-            "deep_task": [255, 55, 95],
-            "python": [48, 130, 200],
-            "thinking": [191, 90, 242],
-            "workspace": [255, 159, 10],
-            "communication": [48, 209, 88],
-            "confirm_whatsapp": [37, 211, 102],
-            "confirm_telegram": [0, 152, 234],
-            "confirm_email": [255, 159, 10],
-            "gui": [94, 92, 230],
-            "mobile": [0, 212, 178],
-            "file_transfer": [0, 180, 160],
-            "file_ops": [255, 214, 10],
-            "terminal": [50, 215, 75],
-            "memory": [175, 82, 222],
-            "calendar": [90, 200, 250],
-            "clipboard": [255, 100, 130],
-            "image_gen": [255, 45, 85],
-            "done": [48, 209, 88],
-            "idle": [110, 110, 120],
-        }
-        self.target_rgb = color_map.get(self.current_action_type, [191, 90, 242])
+        self.target_rgb = self.COLOR_MAP.get(self.current_action_type, [191, 90, 242])
 
         for i in range(3):
             self.current_rgb[i] += (self.target_rgb[i] - self.current_rgb[i]) * 0.16
@@ -939,23 +1589,11 @@ class AgentPanel(QWidget):
 
     def reset_island_style(self):
         self.current_action_type = "idle"
-        self.target_rgb = [110.0, 110.0, 120.0]
+        self.target_rgb = [110, 110, 120]
 
     def start_pulse_animation(self):
         if not self.rgb_timer.isActive():
             self.rgb_timer.start(36)
-
-    def snap_scroll_to_bottom(self):
-        vbar = self.thought_scroll.verticalScrollBar()
-        target_val = vbar.maximum()
-        if abs(target_val - vbar.value()) <= 2:
-            vbar.setValue(target_val)
-            return
-        if self.scroll_anim.state() == QPropertyAnimation.Running:
-            self.scroll_anim.stop()
-        self.scroll_anim.setStartValue(vbar.value())
-        self.scroll_anim.setEndValue(target_val)
-        self.scroll_anim.start()
 
     def keyPressEvent(self, event):
         if self.awaiting_confirmation:
@@ -970,24 +1608,10 @@ class AgentPanel(QWidget):
         super().keyPressEvent(event)
 
     def calculate_target_geometry(self):
-        fixed_width = self.MIN_WIDTH
-        base_height = self.DEFAULT_HEIGHT
-
-        if self.awaiting_confirmation and self.preview_card.isVisible():
-            extra_height = 200
-            if self.preview_subject_input.isVisible():
-                extra_height += 38
-            if self.preview_attachment_label.isVisible():
-                extra_height += 30
-            fixed_height = base_height + extra_height
-        elif self.obs_card.isVisible() and self.obs_label.text().strip():
-            fm = QFontMetrics(self.obs_label.font())
-            avail_w = fixed_width - 108
-            bound = fm.boundingRect(0, 0, avail_w, 300, Qt.TextWordWrap, self.obs_label.text())
-            obs_h = min(72, max(24, bound.height() + 4))
-            fixed_height = base_height + obs_h + 34
-        else:
-            fixed_height = base_height
+        fixed_width = self.user_width
+        base_height = self.user_height
+        extra_height = self.get_extra_cards_height(fixed_width)
+        fixed_height = base_height + extra_height
 
         self.layout.activate()
         self.wrapper_layout.activate()
@@ -1080,11 +1704,11 @@ class AgentPanel(QWidget):
             }}
         """)
 
-        to_display = f"To: {recipient}"
-        self.set_label_font(self.preview_to_label, to_display, 9, QFont.Bold)
+        self._raw_to_text = f"To: {recipient}"
+        self.set_label_font(self.preview_to_label, self._raw_to_text, 9, QFont.Bold)
         fm = QFontMetrics(self.preview_to_label.font())
-        elided_to = fm.elidedText(to_display, Qt.ElideRight, 360)
-        self.preview_to_label.setText(elided_to)
+        max_to_w = max(180, self.user_width - 220)
+        self.preview_to_label.setText(fm.elidedText(self._raw_to_text, Qt.ElideRight, max_to_w))
 
         if platform == "email":
             self.set_label_font(self.preview_subject_input, subject, 10)
@@ -1098,12 +1722,14 @@ class AgentPanel(QWidget):
         self.preview_body_edit.setPlainText(body)
 
         if attachments:
-            att_text = f"Attachment: {', '.join(attachments)}"
-            self.set_label_font(self.preview_attachment_label, att_text, 8, QFont.Bold)
+            self._raw_attachment_text = f"Attachment: {', '.join(attachments)}"
+            self.set_label_font(self.preview_attachment_label, self._raw_attachment_text, 8, QFont.Bold)
             fm_att = QFontMetrics(self.preview_attachment_label.font())
-            self.preview_attachment_label.setText(fm_att.elidedText(att_text, Qt.ElideRight, 460))
+            max_att_w = max(220, self.user_width - 120)
+            self.preview_attachment_label.setText(fm_att.elidedText(self._raw_attachment_text, Qt.ElideRight, max_att_w))
             self.preview_attachment_label.show()
         else:
+            self._raw_attachment_text = ""
             self.preview_attachment_label.clear()
             self.preview_attachment_label.hide()
 
@@ -1160,15 +1786,17 @@ class AgentPanel(QWidget):
 
             self.target_geometry = new_geometry
 
+            start_geom = QRect(
+                new_geometry.x(),
+                new_geometry.y() - 24,
+                new_geometry.width(),
+                new_geometry.height(),
+            )
             if not self.isVisible():
-                start_y = self.target_geometry.y() - 28
-                self.setGeometry(
-                    self.target_geometry.x(),
-                    start_y,
-                    self.target_geometry.width(),
-                    self.target_geometry.height(),
-                )
+                self.setGeometry(start_geom)
                 self.setWindowOpacity(0.0)
+            else:
+                start_geom = self.geometry()
 
             self.show()
             self.raise_()
@@ -1176,19 +1804,19 @@ class AgentPanel(QWidget):
             self.show_anim_group = QParallelAnimationGroup(self)
 
             fade_in = QPropertyAnimation(self, b"windowOpacity")
-            fade_in.setDuration(240)
+            fade_in.setDuration(230)
             fade_in.setStartValue(self.windowOpacity())
             fade_in.setEndValue(1.0)
             fade_in.setEasingCurve(QEasingCurve.OutCubic)
             self.show_anim_group.addAnimation(fade_in)
 
-            if not getattr(self, "is_dragging", False):
-                slide_down = QPropertyAnimation(self, b"pos")
-                slide_down.setDuration(320)
-                slide_down.setStartValue(self.pos())
-                slide_down.setEndValue(QPoint(self.target_geometry.x(), self.target_geometry.y()))
-                slide_down.setEasingCurve(QEasingCurve.OutQuint)
-                self.show_anim_group.addAnimation(slide_down)
+            if not self.is_dragging and not self.is_resizing:
+                geom_anim = QPropertyAnimation(self, b"anim_geometry")
+                geom_anim.setDuration(290)
+                geom_anim.setStartValue(start_geom)
+                geom_anim.setEndValue(new_geometry)
+                geom_anim.setEasingCurve(QEasingCurve.OutQuint)
+                self.show_anim_group.addAnimation(geom_anim)
 
             self.show_anim_group.start()
         else:
@@ -1197,7 +1825,7 @@ class AgentPanel(QWidget):
                 if self.resize_anim.state() == QPropertyAnimation.Running:
                     self.resize_anim.stop()
 
-                if getattr(self, "is_dragging", False):
+                if self.is_dragging or self.is_resizing:
                     self.setGeometry(new_geometry)
                 else:
                     self.resize_anim.setStartValue(self.geometry())
@@ -1208,6 +1836,8 @@ class AgentPanel(QWidget):
         if not self.isVisible():
             return
 
+        self.clear_override_cursor()
+
         if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
             self.show_anim_group.stop()
         if self.resize_anim.state() == QPropertyAnimation.Running:
@@ -1216,15 +1846,17 @@ class AgentPanel(QWidget):
         self.hide_anim_group = QParallelAnimationGroup(self)
 
         fade_out = QPropertyAnimation(self, b"windowOpacity")
-        fade_out.setDuration(220)
+        fade_out.setDuration(210)
         fade_out.setStartValue(self.windowOpacity())
         fade_out.setEndValue(0.0)
         fade_out.setEasingCurve(QEasingCurve.InOutQuad)
 
-        slide_up = QPropertyAnimation(self, b"pos")
-        slide_up.setDuration(260)
-        slide_up.setStartValue(self.pos())
-        slide_up.setEndValue(QPoint(self.x(), self.y() - 22))
+        curr_geom = self.geometry()
+        end_geom = QRect(curr_geom.x(), curr_geom.y() - 20, curr_geom.width(), curr_geom.height())
+        slide_up = QPropertyAnimation(self, b"anim_geometry")
+        slide_up.setDuration(240)
+        slide_up.setStartValue(curr_geom)
+        slide_up.setEndValue(end_geom)
         slide_up.setEasingCurve(QEasingCurve.InCubic)
 
         self.hide_anim_group.addAnimation(fade_out)
@@ -1274,6 +1906,7 @@ class AgentPanel(QWidget):
 
         if step == 0 and action in ["idle", ""] and "Initialized" in thought:
             self.reset_island_style()
+            self.thought_viewer.reset_scroll_lock()
             return
 
         if self.awaiting_confirmation:
@@ -1310,6 +1943,7 @@ class AgentPanel(QWidget):
         if is_task_complete:
             self.phase_label.setText("Done")
             self.status_tag.setText("Task Completed")
+            self._raw_detail_text = ""
             self.detail_pill.hide()
         else:
             base_text, self.current_action_type = self.resolve_action_display(action)
@@ -1317,39 +1951,23 @@ class AgentPanel(QWidget):
 
             clean_detail = str(action_detail or "").strip()
             if clean_detail and action != "THINKING":
+                self._raw_detail_text = clean_detail
                 self.set_label_font(self.detail_pill, clean_detail, 8, QFont.Medium)
                 fm = QFontMetrics(self.detail_pill.font())
-                elided_detail = fm.elidedText(clean_detail, Qt.ElideRight, 210)
+                max_detail_w = max(110, self.user_width - 365)
+                elided_detail = fm.elidedText(clean_detail, Qt.ElideRight, max_detail_w)
                 self.detail_pill.setText(elided_detail)
                 self.detail_pill.show()
             else:
+                self._raw_detail_text = ""
                 self.detail_pill.clear()
                 self.detail_pill.hide()
 
             if self.current_step != step:
+                if step == 1:
+                    self.thought_viewer.reset_scroll_lock()
                 self.phase_label.setText(f"Step {step:02}")
                 self.current_step = step
-
-        if thought:
-            clean_thought = thought.strip()
-            if len(clean_thought) > self.MAX_THOUGHT_CHARS:
-                cutoff_idx = len(clean_thought) - self.MAX_THOUGHT_CHARS
-                space_pos = clean_thought.find(" ", cutoff_idx)
-                if space_pos != -1:
-                    clean_thought = "... " + clean_thought[space_pos:].strip()
-                else:
-                    clean_thought = "... " + clean_thought[-self.MAX_THOUGHT_CHARS:]
-
-            if len(clean_thought) <= 65 and "\n" not in clean_thought:
-                self.thought_label.setAlignment(Qt.AlignCenter)
-            else:
-                self.thought_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-            self.set_label_font(self.thought_label, clean_thought, 12, QFont.Medium)
-            self.thought_label.setText(clean_thought)
-            self.scroll_timer.start(15)
-        else:
-            self.thought_label.setText("")
 
         if observation and not is_task_complete:
             clean_obs = observation.replace("Observation:", "").strip()
@@ -1370,6 +1988,20 @@ class AgentPanel(QWidget):
 
         self.show_panel()
 
+        if thought:
+            clean_thought = thought.strip()
+            if len(clean_thought) > self.MAX_THOUGHT_CHARS:
+                cutoff_idx = len(clean_thought) - self.MAX_THOUGHT_CHARS
+                newline_pos = clean_thought.find("\n", cutoff_idx)
+                if newline_pos != -1:
+                    clean_thought = "...\n" + clean_thought[newline_pos + 1:].strip()
+                else:
+                    clean_thought = "... " + clean_thought[-self.MAX_THOUGHT_CHARS:]
+
+            self.schedule_thought_render(clean_thought)
+        else:
+            self.schedule_thought_render("")
+
         if is_task_complete:
             self.hide_timer.start(4000)
         else:
@@ -1377,7 +2009,6 @@ class AgentPanel(QWidget):
 
 
 def run_panel():
-    qInstallMessageHandler(qt_message_handler)
     app = QApplication(sys.argv)
     panel = AgentPanel()
     sys.exit(app.exec_())
