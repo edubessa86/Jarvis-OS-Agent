@@ -43,26 +43,31 @@ qInstallMessageHandler(qt_message_handler)
 
 PREMIUM_SINGLE_LINE_SCROLLBAR_CSS = """
     QScrollBar:vertical {
-        background: rgba(255, 255, 255, 0.06);
-        width: 2px;
-        margin: 4px 1px 4px 1px;
-        border-radius: 1px;
+        border: none;
+        background: transparent;
+        width: 6px;
+        margin: 0px;
     }
     QScrollBar::handle:vertical {
-        background: rgba(255, 255, 255, 0.38);
-        border-radius: 1px;
-        min-height: 24px;
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 3px;
+        min-height: 20px;
     }
     QScrollBar::handle:vertical:hover {
-        background: rgba(255, 255, 255, 0.75);
-    }
-    QScrollBar::handle:vertical:pressed {
-        background: rgba(255, 255, 255, 0.95);
+        background: rgba(191, 90, 242, 0.65);
     }
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        border: none;
+        background: none;
         height: 0px;
         width: 0px;
+    }
+    QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {
+        border: none;
         background: none;
+        image: none;
+        height: 0px;
+        width: 0px;
     }
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
         background: none;
@@ -302,7 +307,8 @@ class ThoughtViewer(QTextBrowser):
                 border: none;
                 padding: 2px 6px 2px 2px;
             }
-        """ + PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
+        """)
+        self.verticalScrollBar().setStyleSheet(PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
 
         self.user_scrolled_up = False
         self._updating_dom = False
@@ -1183,7 +1189,8 @@ class AgentPanel(QWidget):
                 border: 1px solid rgba(255, 255, 255, 0.28);
                 background-color: rgba(0, 0, 0, 0.50);
             }
-        """ + PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
+        """)
+        self.preview_body_edit.verticalScrollBar().setStyleSheet(PREMIUM_SINGLE_LINE_SCROLLBAR_CSS)
         self.preview_layout.addWidget(self.preview_body_edit)
 
         self.preview_attachment_label = QLabel("")
