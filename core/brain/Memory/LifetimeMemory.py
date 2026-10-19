@@ -2,14 +2,36 @@ import os
 import json
 import threading
 import time
+import re
 import networkx as nx
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-import re
 from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cosine
 from core.logger.logger import logger
+
+
+SINGULAR_RELATIONS = {
+    "LIVES_IN",
+    "LOCATED_IN",
+    "AGE",
+    "HAS_AGE",
+    "FATHER",
+    "MOTHER",
+    "SPOUSE",
+    "WORKS_AT",
+    "WORKS_AS",
+    "PROFESSION",
+    "COLLEGE",
+    "STUDIES_AT",
+    "DEGREE",
+    "CURRENT_PROJECT",
+    "HAS_PHONE",
+    "HAS_EMAIL",
+    "LAPTOP",
+    "USES_LAPTOP",
+}
 
 
 class LifetimeMemoryEngine:
@@ -21,9 +43,8 @@ class LifetimeMemoryEngine:
         self._embed_lock = threading.RLock()
 
         logger.info("⏳ Loading Semantic Embedding Model (BAAI/bge-small-en-v1.5) for LTM...")
-        self.embedder = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        self.embedder = SentenceTransformer("BAAI/bge-small-en-v1.5")
         self.node_embeddings = {}
-        self.metadata_embeddings = {}
         self.relation_embeddings = {}
 
         self._load_graph()
@@ -33,29 +54,31 @@ class LifetimeMemoryEngine:
         nodes = list(self.graph.nodes())
         if nodes:
             with self._embed_lock:
-                embeddings = self.embedder.encode(nodes, show_progress_bar=False)
+                embeddings = self.embedder.encode(
+                    nodes, normalize_embeddings=True, show_progress_bar=False
+                )
             for node, emb in zip(nodes, embeddings):
                 self.node_embeddings[node] = emb
 
         unique_relations = set()
         for u, v, data in self.graph.edges(data=True):
-            if 'metadata' in data and data['metadata'] and data['metadata'].get('source_message'):
-                msg = data['metadata']['source_message']
-                if msg and msg not in self.metadata_embeddings:
-                    self.metadata_embeddings[msg] = self._get_embedding(msg)
-            if 'relation' in data:
-                unique_relations.add(data['relation'].upper())
+            if "relation" in data and data["relation"]:
+                unique_relations.add(str(data["relation"]).upper())
 
         if unique_relations:
             rel_list = list(unique_relations)
             with self._embed_lock:
-                rel_embeddings = self.embedder.encode(rel_list, show_progress_bar=False)
+                rel_embeddings = self.embedder.encode(
+                    rel_list, normalize_embeddings=True, show_progress_bar=False
+                )
             for rel, emb in zip(rel_list, rel_embeddings):
                 self.relation_embeddings[rel] = emb
 
-    def _get_embedding(self, text):
+    def _get_embedding(self, text: str):
         with self._embed_lock:
-            return self.embedder.encode([text], show_progress_bar=False)[0]
+            return self.embedder.encode(
+                [str(text)], normalize_embeddings=True, show_progress_bar=False
+            )[0]
 
     def embed(self, texts, is_query=False):
         if texts is None:
@@ -82,7 +105,7 @@ class LifetimeMemoryEngine:
                     processed,
                     normalize_embeddings=True,
                     show_progress_bar=False,
-                    batch_size=32
+                    batch_size=32,
                 )
             if single:
                 return embeddings[0].tolist()
@@ -90,6 +113,52 @@ class LifetimeMemoryEngine:
         except Exception as e:
             logger.error(f"LTM embed failed: {e}")
             return None
+
+    @staticmethod
+    def _is_token_match(query_str: str, target_str: str) -> bool:
+        """
+        Strict whole-word token match (prevents 'Ram' matching inside 'Telegram').
+        """
+        q_clean = query_str.strip().lower()
+        t_clean = target_str.strip().lower()
+        if not q_clean or not t_clean:
+            return False
+        if q_clean == t_clean:
+            return True
+        q_tokens = {tok for tok in re.findall(r"\w+", q_clean) if len(tok) >= 3}
+        t_tokens = {tok for tok in re.findall(r"\w+", t_clean) if len(tok) >= 3}
+        if not q_tokens or not t_tokens:
+            return False
+        return q_tokens.issubset(t_tokens) or t_tokens.issubset(q_tokens)
+
+    def _relation_matches(self, edge_rel: str, requested_rel: str, threshold: float = 0.78) -> bool:
+        if not requested_rel:
+            return True
+        e_rel = (edge_rel or "").strip().upper()
+        r_rel = (requested_rel or "").strip().upper()
+        if not e_rel:
+            return False
+        if e_rel == r_rel:
+            return True
+
+        e_tokens = {t for t in e_rel.split("_") if len(t) >= 3 and t not in {"HAS", "IS", "THE", "FOR"}}
+        r_tokens = {t for t in re.split(r"[_\s]+", r_rel) if len(t) >= 3 and t not in {"HAS", "IS", "THE", "FOR"}}
+        if e_tokens and r_tokens and (e_tokens & r_tokens):
+            return True
+
+        try:
+            e_emb = self.relation_embeddings.get(e_rel)
+            if e_emb is None:
+                e_emb = self._get_embedding(e_rel.replace("_", " "))
+                self.relation_embeddings[e_rel] = e_emb
+            r_emb = self.relation_embeddings.get(r_rel)
+            if r_emb is None:
+                r_emb = self._get_embedding(r_rel.replace("_", " "))
+                self.relation_embeddings[r_rel] = r_emb
+            sim = 1.0 - float(cosine(e_emb, r_emb))
+            return sim >= threshold
+        except Exception:
+            return False
 
     def get_all_node_names(self, limit=100):
         with self._lock:
@@ -100,25 +169,25 @@ class LifetimeMemoryEngine:
         with self._lock:
             relations = set()
             for u, v, data in self.graph.edges(data=True):
-                if 'relation' in data:
-                    relations.add(data['relation'])
+                if not data.get("archived", False) and "relation" in data:
+                    relations.add(data["relation"])
             return list(relations)[:limit]
 
-    def _deduplicate_relation(self, rel, threshold=0.85):
+    def _deduplicate_relation(self, rel, threshold=0.86):
         if not rel:
             return rel
-        rel = rel.upper()
+        rel = rel.upper().strip().replace(" ", "_")
 
         with self._lock:
             if rel in self.relation_embeddings:
                 return rel
 
-            rel_emb = self._get_embedding(rel)
+            rel_emb = self._get_embedding(rel.replace("_", " "))
             best_match = None
-            best_sim = -1
+            best_sim = -1.0
 
             for ex_rel, ex_emb in self.relation_embeddings.items():
-                sim = 1 - cosine(rel_emb, ex_emb)
+                sim = 1.0 - float(cosine(rel_emb, ex_emb))
                 if sim > best_sim:
                     best_sim = sim
                     best_match = ex_rel
@@ -157,6 +226,7 @@ class LifetimeMemoryEngine:
             while True:
                 time.sleep(86400)
                 self._archive_old_edges()
+
         threading.Thread(target=cleanup_loop, daemon=True).start()
 
     def _archive_old_edges(self):
@@ -164,7 +234,7 @@ class LifetimeMemoryEngine:
             now = datetime.now()
             to_archive = []
             for u, v, data in self.graph.edges(data=True):
-                last_seen = data.get('last_seen')
+                last_seen = data.get("last_seen")
                 if last_seen:
                     try:
                         last_date = datetime.strptime(last_seen, "%Y-%m-%d")
@@ -173,11 +243,20 @@ class LifetimeMemoryEngine:
                     except Exception as e:
                         logger.error(f"Date parse error in archive: {e}")
             for u, v in to_archive:
-                self.graph.edges[u, v]['archived'] = True
+                self.graph.edges[u, v]["archived"] = True
             if to_archive:
                 self._save_graph()
 
-    def record_triplet(self, source, relation, target, date_str=None, metadata=None, inverse=None):
+    def record_triplet(
+        self,
+        source,
+        relation,
+        target,
+        date_str=None,
+        metadata=None,
+        inverse=None,
+        is_singular: bool = False,
+    ):
         if not source or not relation or not target:
             return
 
@@ -188,6 +267,7 @@ class LifetimeMemoryEngine:
         if not src or not rel or not tgt:
             return
         date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+        singular_flag = bool(is_singular or rel in SINGULAR_RELATIONS)
 
         with self._lock:
             if src not in self.node_embeddings:
@@ -195,151 +275,184 @@ class LifetimeMemoryEngine:
             if tgt not in self.node_embeddings:
                 self.node_embeddings[tgt] = self._get_embedding(tgt)
 
+            # Auto-supersede older conflicting target for singular relations
+            if singular_flag and self.graph.has_node(src):
+                for _, old_tgt, old_data in list(self.graph.out_edges(src, data=True)):
+                    if old_tgt != tgt and old_data.get("relation") == rel and not old_data.get("archived", False):
+                        self.graph.edges[src, old_tgt]["archived"] = True
+                        logger.info(
+                            f"🧠 LTM Conflict Resolved: Archived outdated [{src}] --({rel})--> [{old_tgt}] in favor of [{tgt}]"
+                        )
+
             edge_data = self.graph.get_edge_data(src, tgt, default=None)
-            if edge_data is not None and edge_data.get('relation') == rel:
-                self.graph.edges[src, tgt]['weight'] = edge_data.get('weight', 1) + 1
-                self.graph.edges[src, tgt]['count'] = edge_data.get('count', 1) + 1
-                self.graph.edges[src, tgt]['last_seen'] = date_str
+            if edge_data is not None and edge_data.get("relation") == rel:
+                self.graph.edges[src, tgt]["weight"] = edge_data.get("weight", 1) + 1
+                self.graph.edges[src, tgt]["count"] = edge_data.get("count", 1) + 1
+                self.graph.edges[src, tgt]["last_seen"] = date_str
                 if metadata:
-                    self.graph.edges[src, tgt]['metadata'] = metadata
-                if 'first_seen' not in edge_data:
-                    self.graph.edges[src, tgt]['first_seen'] = date_str
-                if 'archived' in self.graph.edges[src, tgt]:
-                    del self.graph.edges[src, tgt]['archived']
+                    self.graph.edges[src, tgt]["metadata"] = metadata
+                if "first_seen" not in edge_data:
+                    self.graph.edges[src, tgt]["first_seen"] = date_str
+                if "archived" in self.graph.edges[src, tgt]:
+                    del self.graph.edges[src, tgt]["archived"]
             else:
-                self.graph.add_edge(src, tgt, relation=rel, date=date_str, weight=1, count=1, first_seen=date_str, last_seen=date_str, metadata=metadata)
+                self.graph.add_edge(
+                    src,
+                    tgt,
+                    relation=rel,
+                    date=date_str,
+                    weight=1,
+                    count=1,
+                    first_seen=date_str,
+                    last_seen=date_str,
+                    metadata=metadata,
+                )
 
-            if metadata and metadata.get('source_message'):
-                msg = metadata['source_message']
-                if msg not in self.metadata_embeddings:
-                    self.metadata_embeddings[msg] = self._get_embedding(msg)
-
-            if inverse:
+            if inverse and isinstance(inverse, dict):
                 inv_tgt = str(inverse.get("target", "")).strip().title()
                 inv_rel = self._deduplicate_relation(str(inverse.get("relation", "")).strip())
 
                 if inv_rel and inv_tgt:
+                    if inv_tgt not in self.node_embeddings:
+                        self.node_embeddings[inv_tgt] = self._get_embedding(inv_tgt)
                     inv_edge_data = self.graph.get_edge_data(tgt, inv_tgt, default=None)
-                    if inv_edge_data is not None and inv_edge_data.get('relation') == inv_rel:
-                        self.graph.edges[tgt, inv_tgt]['weight'] = inv_edge_data.get('weight', 1) + 1
-                        self.graph.edges[tgt, inv_tgt]['last_seen'] = date_str
+                    if inv_edge_data is not None and inv_edge_data.get("relation") == inv_rel:
+                        self.graph.edges[tgt, inv_tgt]["weight"] = inv_edge_data.get("weight", 1) + 1
+                        self.graph.edges[tgt, inv_tgt]["last_seen"] = date_str
+                        if "archived" in self.graph.edges[tgt, inv_tgt]:
+                            del self.graph.edges[tgt, inv_tgt]["archived"]
                     else:
-                        self.graph.add_edge(tgt, inv_tgt, relation=inv_rel, date=date_str, weight=1, count=1, first_seen=date_str, last_seen=date_str, metadata=metadata)
+                        self.graph.add_edge(
+                            tgt,
+                            inv_tgt,
+                            relation=inv_rel,
+                            date=date_str,
+                            weight=1,
+                            count=1,
+                            first_seen=date_str,
+                            last_seen=date_str,
+                            metadata=metadata,
+                        )
 
         self._save_graph()
 
-    def search_lifetime_memory(self, queries, top_k=3, threshold=0.82):
+    def _find_matching_nodes(self, entity_str: str, threshold: float = 0.85):
+        ent_clean = entity_str.strip()
+        if not ent_clean:
+            return []
+
+        ent_emb = self._get_embedding(ent_clean)
+        matched = []
+
+        for node, node_emb in self.node_embeddings.items():
+            if self._is_token_match(ent_clean, node):
+                matched.append((node, 1.0))
+                continue
+            sim = 1.0 - float(cosine(ent_emb, node_emb))
+            if sim >= threshold:
+                matched.append((node, sim))
+
+        matched.sort(key=lambda x: x[1], reverse=True)
+        return [m[0] for m in matched[:3]]
+
+    def search_lifetime_memory(self, queries, top_k=5, threshold=0.85):
         if not queries:
             return "Observation: Query empty."
 
-        entities = []
-        relations = []
+        query_items = []
         if isinstance(queries, str):
-            entities = [queries.strip()]
+            query_items.append({"entity": queries.strip(), "relation": ""})
         elif isinstance(queries, list):
             for q in queries:
                 if isinstance(q, dict):
-                    ent = q.get('entity', '')
-                    if ent:
-                        entities.append(str(ent).strip())
-                    rel = q.get('relation', '')
-                    if rel:
-                        relations.append(str(rel).strip().lower())
-                else:
-                    if str(q).strip():
-                        entities.append(str(q).strip())
+                    ent = str(q.get("entity") or "").strip()
+                    rel = str(q.get("relation") or "").strip()
+                    if ent or rel:
+                        query_items.append({"entity": ent, "relation": rel})
+                elif str(q).strip():
+                    query_items.append({"entity": str(q).strip(), "relation": ""})
 
-        if not entities:
+        if not query_items:
             return "Observation: No clear entities provided."
+
+        has_non_user_entity = any(
+            item["entity"].lower() != "user" and item["entity"] != ""
+            for item in query_items
+        )
 
         results = []
         today = datetime.now().date()
 
         with self._lock:
-            for ent in entities:
-                ent_emb = self._get_embedding(ent)
-                matched_nodes = []
+            for item in query_items:
+                ent = item["entity"]
+                req_rel = item["relation"]
 
-                for node, node_emb in self.node_embeddings.items():
-                    sim = 1 - cosine(ent_emb, node_emb)
-                    if sim >= threshold or ent.lower() in node.lower() or node.lower() in ent.lower():
-                        matched_nodes.append(node)
+                # Prevent hub-node explosion when 'User' is passed without a specific relation alongside other entities
+                if ent.lower() == "user" and not req_rel and has_non_user_entity:
+                    continue
 
-                for msg, msg_emb in self.metadata_embeddings.items():
-                    sim = 1 - cosine(ent_emb, msg_emb)
-                    if sim >= threshold:
-                        for u, v, data in self.graph.edges(data=True):
-                            if data.get('metadata', {}).get('source_message') == msg:
-                                if u not in matched_nodes:
-                                    matched_nodes.append(u)
-                                if v not in matched_nodes:
-                                    matched_nodes.append(v)
+                matched_nodes = self._find_matching_nodes(ent, threshold=threshold) if ent else []
 
-                for u, v, data in self.graph.edges(data=True):
-                    rel = data.get('relation', '')
-                    match_found = False
-                    if ent.lower() in rel.lower():
-                        match_found = True
-                    for r in relations:
-                        if r in rel.lower():
-                            match_found = True
-                    if match_found:
-                        if u not in matched_nodes:
-                            matched_nodes.append(u)
-                        if v not in matched_nodes:
-                            matched_nodes.append(v)
+                # Also allow relation-driven lookup if entity wasn't matched directly or if entity is 'User'
+                candidate_edges = []
+                if matched_nodes:
+                    for m_node in matched_nodes:
+                        for u, v, data in self.graph.out_edges(m_node, data=True):
+                            candidate_edges.append((u, v, data))
+                        for u, v, data in self.graph.in_edges(m_node, data=True):
+                            candidate_edges.append((u, v, data))
+                elif req_rel:
+                    for u, v, data in self.graph.edges(data=True):
+                        candidate_edges.append((u, v, data))
 
-                for matched_node in matched_nodes:
-                    undirected_g = self.graph.to_undirected()
-                    try:
-                        neighbors_dict = nx.single_source_shortest_path_length(undirected_g, matched_node, cutoff=1)
-                    except Exception as e:
-                        logger.error(f"Shortest path calculation failed: {e}")
+                # Also check if 'ent' itself matches a relation name (e.g., user passed entity='father')
+                if not candidate_edges and ent:
+                    for u, v, data in self.graph.edges(data=True):
+                        if self._relation_matches(data.get("relation", ""), ent, threshold=0.82):
+                            candidate_edges.append((u, v, data))
+
+                for u, v, data in candidate_edges:
+                    if data.get("archived", False):
                         continue
 
-                    subgraph = self.graph.subgraph(neighbors_dict.keys())
+                    edge_rel = data.get("relation", "RELATES_TO")
 
-                    for u, v, data in subgraph.edges(data=True):
-                        if data.get('archived', False):
-                            continue
-                        rel = data.get('relation', 'RELATES_TO')
-                        weight = data.get('weight', 1)
-                        count = data.get('count', 1)
-                        last_seen = data.get('last_seen', data.get('date', ''))
-                        metadata = data.get('metadata', {})
-                        source_msg = metadata.get('source_message', '')
+                    # Surgical relation filter!
+                    if req_rel and not self._relation_matches(edge_rel, req_rel, threshold=0.78):
+                        continue
 
-                        days_diff = 0
-                        if last_seen:
-                            try:
-                                last_date = datetime.strptime(last_seen, "%Y-%m-%d").date()
-                                days_diff = (today - last_date).days
-                            except Exception:
-                                pass
+                    weight = float(data.get("weight", 1))
+                    count = int(data.get("count", 1))
+                    last_seen = data.get("last_seen", data.get("date", ""))
+                    metadata = data.get("metadata") or {}
+                    source_msg = metadata.get("source_message", "")
 
-                        match_boost = 1.5 if (u in matched_nodes or v in matched_nodes) else 1.0
+                    days_diff = 0
+                    if last_seen:
+                        try:
+                            last_date = datetime.strptime(last_seen, "%Y-%m-%d").date()
+                            days_diff = (today - last_date).days
+                        except Exception:
+                            pass
 
-                        depth_u = neighbors_dict.get(u, 2)
-                        depth_v = neighbors_dict.get(v, 2)
-                        min_depth = min(depth_u, depth_v)
-                        depth_penalty = 1.0 if min_depth == 0 else 0.8
+                    time_penalty = 0.5 if days_diff > 180 else 1.0
+                    count_boost = min(1.0 + (count - 1) * 0.15, 2.0)
+                    rel_boost = 2.0 if (req_rel and self._relation_matches(edge_rel, req_rel, threshold=0.82)) else 1.0
 
-                        time_penalty = 0.5 if days_diff > 180 else 1.0
-                        count_boost = min(1.0 + (count - 1) * 0.1, 2.0)
+                    adjusted_weight = weight * time_penalty * count_boost * rel_boost
 
-                        adjusted_weight = weight * time_penalty * depth_penalty * match_boost * count_boost
+                    res_text = f"[{u}] --({edge_rel})--> [{v}]"
+                    if source_msg:
+                        res_text += f" (Context: {source_msg})"
 
-                        res_text = f"[{u}] --({rel})--> [{v}]"
-                        if source_msg:
-                            res_text += f" (Context: {source_msg})"
-
-                        results.append({
-                            "text": res_text,
-                            "weight": adjusted_weight
-                        })
+                    results.append({
+                        "text": res_text,
+                        "weight": adjusted_weight,
+                    })
 
         if not results:
-            return "Observation: Found nothing in Graph Memory for these entities."
+            return "Observation: Found nothing in Graph Memory for these entities/relations."
 
         results.sort(key=lambda x: x["weight"], reverse=True)
         unique = []
@@ -349,7 +462,8 @@ class LifetimeMemoryEngine:
                 seen.add(r["text"])
                 unique.append(r["text"])
 
-        res_str = "\n".join(unique[:20])
+        max_items = 8 if len(query_items) == 1 else 12
+        res_str = "\n".join(unique[:max_items])
         return f"Observation: Found relations in Graph Memory:\n{res_str}"
 
 

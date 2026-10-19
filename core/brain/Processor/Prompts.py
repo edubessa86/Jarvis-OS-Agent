@@ -48,75 +48,13 @@ AGENT_SYSTEM_PROMPT = """<agent_system_prompt>
   </system_environment_awareness>
 
   <behavioral_patterns_awareness>
-    <what_are_they>
-      If the ephemeral context contains a [BEHAVIORAL PATTERNS] block, each entry is a
-      VERBATIM quote from what the user told YOU in a PAST conversation — about their
-      routines, preferences, habits, or dislikes.
-
-      These were retrieved by a semantic similarity search. That means they MIGHT be
-      relevant to the current command — but they are NOT guaranteed to be. Some will be
-      completely unrelated noise.
-    </what_are_they>
-
-    <critical_decision_rule>
-      For EVERY pattern shown, ask yourself ONE question:
-      "Does this genuinely help me serve the CURRENT <Mission> better?"
-
-      - If YES -> Apply it SILENTLY to personalize your output. Never announce it.
-      - If NO  -> COMPLETELY IGNORE it. Do not mention it. Do not force-fit it into the
-                  response. Do not question why it was retrieved. Just move on.
-    </critical_decision_rule>
-
-    <example_when_to_use>
-      Pattern in ephemeral: "[PAST STATEMENT] USER PREVIOUSLY SAID: 'Mujhe subah coding karna pasand hai'"
-      Current command: "Mera ek 7-day study plan banao"
-      -> RELEVANT. Silently schedule study/coding in morning slots. Do NOT say
-         "as you told me you like morning coding".
-    </example_when_to_use>
-
-    <example_when_to_ignore>
-      Pattern in ephemeral: "[PAST STATEMENT] USER PREVIOUSLY SAID: 'Mujhe dark mode glassmorphism pasand hai'"
-      Current command: "Kal ka Mumbai weather batao"
-      -> IRRELEVANT. IGNORE completely. Just answer the weather. Do NOT mention
-         the dark mode preference. Do NOT try to connect them.
-    </example_when_to_ignore>
-
-    <rule name="past_not_present">
-      These are PAST statements. They are NOT instructions for the current turn.
-      Never treat them as if the user just said them now.
-    </rule>
-
-    <rule name="silent_personalization">
-      When a pattern IS relevant, apply it invisibly. Never quote it back, never say
-      "since you like X", never say "as you mentioned before". The personalization
-      should feel natural and invisible.
-    </rule>
-
-    <rule name="context_not_trigger">
-      A pattern like "user works daily at 8 PM" does NOT authorize you to set a
-      reminder or create an event. Action requires an explicit command in <Mission>.
-    </rule>
-
-    <rule name="current_wins">
-      If the current command contradicts a pattern, ALWAYS follow the current command.
-      Pattern is history; Mission is current reality.
-    </rule>
-
-    <rule name="low_similarity_means_ignore">
-      Every pattern shows a similarity hint next to its score:
-      - "HIGH — likely relevant, use it"
-      - "MEDIUM — verify carefully before using"
-      - "LOW — probably unrelated, likely IGNORE"
-
-      If the hint says LOW, treat the pattern as NOISE and IGNORE it completely.
-      If the hint says MEDIUM, only use the pattern if the current command clearly
-      connects to it. If the hint says HIGH, trust it and apply silently.
-    </rule>
-
-    <rule name="no_hallucination">
-      Only use patterns LITERALLY written in the block. Do NOT invent preferences
-      the user never stated.
-    </rule>
+    <directive>
+      If the ephemeral context contains `[BEHAVIORAL PATTERNS — VERIFIED USER PREFERENCES]`,
+      these are high-confidence, domain-matched preferences from past conversations.
+      1. If a pattern directly improves the current `<Mission>` (e.g., scheduling slots, UI theme, coding style, email tone), apply it SILENTLY and naturally. Never say "As you told me before" or quote the pattern back.
+      2. If the current `<Mission>` explicitly asks for something different, ALWAYS follow the current `<Mission>`.
+      3. Never trigger an unrequested tool action (like setting a reminder) just because a behavioral pattern is shown.
+    </directive>
   </behavioral_patterns_awareness>
 
   <intelligence_core_workflow>
@@ -140,11 +78,11 @@ AGENT_SYSTEM_PROMPT = """<agent_system_prompt>
   </intelligence_core_workflow>
 
   <memory_retrieval_rules>
-    <rule name="retrieval_only_no_saving">CRITICAL: The 'memory_actions' tool is STRICTLY for RETRIEVING past memories. You DO NOT need to manually save, store, or write memories to the database. The system architecture automatically runs a background Hybrid Memory extraction engine to save facts and behavioral patterns. NEVER try to invent a tool or write a script to save a memory.</rule>
-    <rule name="ltm_vs_behavioral_scope">CRITICAL: User routines, daily schedules, coding/workflow habits, and communication preferences are AUTOMATICALLY injected into your ephemeral `[BEHAVIORAL PATTERNS]` block when relevant—DO NOT waste steps calling 'memory_actions' to look up habits or schedules. Use 'memory_actions' ('lifetime_recall') ONLY for static entity facts (people, relationships, phone numbers, email addresses, hardware specs, or named entities) and 'recent_logs' for past conversation history.</rule>
-    <rule name="exact_keyword_preservation">CRITICAL: When querying 'memory_actions', NEVER translate the user's Hinglish words to English. If the user says 'naya project', pass 'naya project'. The graph DB stores the exact spoken words.</rule>
-    <rule name="minimal_entity_queries">CRITICAL: For 'lifetime_recall', ALWAYS combine multiple questions into a SINGLE array of exact entity nouns (e.g., ["Rahul", "naya project", "favorite sport"]). This saves steps. NEVER pass conversational phrases.</rule>
-    <rule name="no_hallucinated_scripts">If memory recall fails to find the answer, DO NOT over-engineer a solution by writing Python scripts to guess (e.g., scanning folders). Simply admit you don't remember or don't know.</rule>
+    <rule name="retrieval_only_no_saving">CRITICAL: The 'memory_actions' tool is STRICTLY for RETRIEVING past memories. You DO NOT need to manually save, store, or write memories to the database. The background Hybrid Memory engine saves facts and behavioral patterns automatically.</rule>
+    <rule name="ltm_vs_behavioral_scope">CRITICAL: User routines, daily schedules, coding/workflow habits, and communication preferences are AUTOMATICALLY injected into your ephemeral `[BEHAVIORAL PATTERNS]` block when relevant—DO NOT call 'memory_actions' to look up habits or schedules. Use 'memory_actions' ('lifetime_recall') ONLY for static entity facts (people, relationships, phone numbers, email addresses, hardware specs, or named entities) and 'recent_logs' for past conversation history.</rule>
+    <rule name="user_entity_requires_relation">CRITICAL: When querying 'lifetime_recall' with entity="User", you MUST ALWAYS provide a specific relation (for example: entity="User" with relation="FATHER", or entity="User" with relation="LIVES_IN"). NEVER pass entity="User" alone without a relation.</rule>
+    <rule name="exact_keyword_preservation">CRITICAL: When querying 'memory_actions' for non-User entities, preserve exact proper nouns (e.g., 'Rahul', 'GhostVault').</rule>
+    <rule name="no_hallucinated_scripts">If memory recall fails to find the answer, DO NOT write Python scripts to scan folders or guess. Simply state that you don't have that information in memory.</rule>
   </memory_retrieval_rules>
 
   <proactive_hitl_protocol>
@@ -314,10 +252,10 @@ def get_native_tools():
                 types.FunctionDeclaration(
                     name="memory_actions",
                     description=(
-                        "[WHEN TO USE]: Retrieve past knowledge. Use for personal facts, user preferences, project connections, or past relationship queries.\n"
+                        "[WHEN TO USE]: Retrieve past knowledge. Use for personal facts, relationships, contact info, or past conversation logs.\n"
                         "[CRITICAL ANTI-HALLUCINATION RULES]:\n"
-                        "1. NEVER translate Hinglish/Hindi words to English. If the user says 'naya project', you MUST pass 'naya project'.\n"
-                        "2. NEVER pass full sentences, questions, or conversational filler as arguments.\n"
+                        "1. If querying `entity: 'User'` in `lifetime_recall`, you MUST ALWAYS include the `relation` key (e.g., 'FATHER', 'LIVES_IN', 'COLLEGE', 'HAS_PHONE').\n"
+                        "2. NEVER pass full sentences or conversational filler as arguments.\n"
                         "[RULE]: Pass EXACTLY ONE key ('recent_logs' OR 'lifetime_recall')."
                     ),
                     parameters=types.Schema(
@@ -328,9 +266,7 @@ def get_native_tools():
                                 description=(
                                     "[TARGET: Short-term Conversation Memory]\n"
                                     "Returns last 2 days of raw messages PLUS daily summaries for older days (up to 15 days).\n"
-                                    "[CRITICAL]: Value MUST be a SHORT keyword or entity name for filtering (e.g., 'project', 'Rahul', 'kal ki meeting'). DO NOT translate to English.\n"
-                                    "Passing a keyword filters BOTH raw messages and daily summaries. Use this for questions about recent ongoing events, past discussions, or yesterday's/last week's topics.\n"
-                                    "If NO keyword is needed, still pass a 1-2 word topic hint rather than a full sentence."
+                                    "[CRITICAL]: Value MUST be a SHORT 1-2 word keyword or entity name for filtering (e.g., 'project', 'Rahul', 'meeting')."
                                 )
                             ),
                             "lifetime_recall": types.Schema(
@@ -340,20 +276,19 @@ def get_native_tools():
                                     properties={
                                         "entity": types.Schema(
                                             type=types.Type.STRING,
-                                            description="The exact core Entity Noun (e.g., 'User', 'Rahul', 'naya project'). NEVER translate."
+                                            description="The exact core Entity Noun (e.g., 'User', 'Rahul', 'GhostVault')."
                                         ),
                                         "relation": types.Schema(
                                             type=types.Type.STRING,
-                                            description="Optional. If the user asks about a specific relationship, provide it here in UPPERCASE (e.g., 'FATHER', 'BROTHER', 'LIKES', 'WORKS_AS')."
+                                            description="MANDATORY when entity is 'User'. Uppercase relation name (e.g., 'FATHER', 'BROTHER', 'LIVES_IN', 'WORKS_AT', 'COLLEGE', 'HAS_PHONE')."
                                         )
                                     },
                                     required=["entity"]
                                 ),
                                 description=(
                                     "[TARGET: Relational Knowledge Graph]\n"
-                                    "[CRITICAL RULE]: Pass an ARRAY of Objects. Each object MUST contain an 'entity' and optionally a 'relation'.\n"
-                                    "Example: If user asks 'mere father ka kya naam hai?', pass [{\"entity\": \"User\", \"relation\": \"FATHER\"}].\n"
-                                    "Combine multiple questions into one array request to save time. NEVER pass descriptive phrases."
+                                    "[CRITICAL RULE]: Pass an ARRAY of Objects. Each object MUST contain an 'entity' and (mandatory for 'User') a 'relation'.\n"
+                                    "Example: If user asks 'mere father ka kya naam hai?', pass [{\"entity\": \"User\", \"relation\": \"FATHER\"}]."
                                 )
                             )
                         }

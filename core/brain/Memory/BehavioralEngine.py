@@ -1,11 +1,21 @@
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
 from scipy.spatial.distance import cosine
 
 from core.logger.logger import logger
+
+VALID_BEHAVIORAL_DOMAINS = {"coding", "scheduling", "communication", "ui_design", "lifestyle"}
+
+EXPLICIT_PERMANENT_REGEX = re.compile(
+    r"\b(hamesha|always|never|kabhi\s*nahi|kabhi\s*mat|yaad\s*rakhna|remember\s*that|"
+    r"from\s*now\s*on|aage\s*se|roz|rozana|daily|every\s*day|every\s*morning|"
+    r"every\s*night|aadat|routine|usually|aksar)\b",
+    re.IGNORECASE,
+)
 
 
 class BehavioralPatternEngine:
@@ -15,37 +25,57 @@ class BehavioralPatternEngine:
         self.patterns_file = self.memory_dir / "behavioral_patterns.jsonl"
         self._lock = threading.RLock()
 
-        self.dedupe_threshold = 0.85
-        self.similarity_threshold = 0.62
-        self.top_k = 3
+        self.dedupe_threshold = 0.84
+        self.similarity_threshold = 0.75
+        self.min_confidence_gate = 0.85
+        self.top_k = 2
         self.recency_decay_days = 180
 
-        self._last_query = None
+        self._last_cache_key = None
         self._last_ephemeral_block = ""
 
         self.patterns = self._load_patterns()
 
         logger.info(
-            f"BehavioralPatternEngine ready | patterns_loaded={len(self.patterns)}"
+            f"BehavioralPatternEngine ready | patterns_loaded={len(self.patterns)} "
+            f"| active={sum(1 for p in self.patterns if p.get('active', True))}"
         )
 
     @staticmethod
     def _build_embed_text(pattern_entry: dict) -> str:
-        raw = (pattern_entry.get("raw_statement") or "").strip()
+        """
+        Builds a 100% pure English representation for BAAI/bge-small-en-v1.5.
+        Excludes Hinglish raw_statement to prevent cross-lingual vector pollution.
+        """
         meaning = (pattern_entry.get("meaning") or "").strip()
         triggers = (pattern_entry.get("trigger_contexts") or "").strip()
+        raw = (pattern_entry.get("raw_statement") or "").strip()
+
         parts = []
         if meaning:
-            parts.append(meaning)
+            parts.append(meaning.rstrip("."))
         if triggers:
-            parts.append(f"Relevant for: {triggers}")
-        if raw:
+            parts.append(f"Applicable when user requests: {triggers.rstrip('.')}")
+        if not parts and raw:
             parts.append(raw)
         return ". ".join(parts)
 
+    @staticmethod
+    def _infer_domain_from_text(text: str) -> str:
+        low = (text or "").lower()
+        if any(w in low for w in ("schedule", "timetable", "study", "morning", "night", "8 pm", "hour", "slot", "routine", "wake", "sleep")):
+            return "scheduling"
+        if any(w in low for w in ("dark mode", "glassmorphism", "ui", "css", "dashboard", "theme", "frontend", "layout", "design")):
+            return "ui_design"
+        if any(w in low for w in ("code", "coding", "python", "script", "comment", "modular", "ide", "react", "programming")):
+            return "coding"
+        if any(w in low for w in ("email", "mail", "whatsapp", "telegram", "message", "tone", "formal", "reply", "short")):
+            return "communication"
+        return "lifestyle"
+
     def _invalidate_cache(self):
         with self._lock:
-            self._last_query = None
+            self._last_cache_key = None
             self._last_ephemeral_block = ""
 
     def _load_patterns(self):
@@ -62,6 +92,15 @@ class BehavioralPatternEngine:
                         entry = json.loads(line)
                         if isinstance(entry, dict) and entry.get("raw_statement"):
                             entry.pop("_embedding", None)
+                            if "domain" not in entry or entry["domain"] not in VALID_BEHAVIORAL_DOMAINS:
+                                combined = f"{entry.get('meaning', '')} {entry.get('trigger_contexts', '')}"
+                                entry["domain"] = self._infer_domain_from_text(combined)
+                            if "active" not in entry:
+                                count = int(entry.get("evidence_count", 1))
+                                conf = float(entry.get("confidence", 0.7))
+                                raw_s = entry.get("raw_statement", "")
+                                is_perm = bool(EXPLICIT_PERMANENT_REGEX.search(raw_s))
+                                entry["active"] = bool(count >= 2 or is_perm or conf >= 0.85)
                             loaded.append(entry)
                     except json.JSONDecodeError:
                         continue
@@ -103,8 +142,25 @@ class BehavioralPatternEngine:
         raw = (new_pattern.get("raw_statement") or "").strip()
         meaning = (new_pattern.get("meaning") or "").strip()
         triggers = (new_pattern.get("trigger_contexts") or "").strip()
-        if not raw or len(raw.split()) < 3:
+        conf = float(new_pattern.get("confidence", 0.0))
+
+        if not raw or len(raw.split()) < 3 or not meaning:
             return
+
+        if conf < self.min_confidence_gate:
+            logger.debug(
+                f"🧠 Behavioral pattern rejected by confidence gate ({conf:.2f} < {self.min_confidence_gate}): '{raw[:45]}'"
+            )
+            return
+
+        domain = str(new_pattern.get("domain") or "").strip().lower()
+        if domain not in VALID_BEHAVIORAL_DOMAINS:
+            domain = self._infer_domain_from_text(f"{meaning} {triggers}")
+
+        is_explicit_perm = bool(
+            new_pattern.get("is_explicit_permanent", False)
+            or EXPLICIT_PERMANENT_REGEX.search(raw)
+        )
 
         embed_text = self._build_embed_text({
             "raw_statement": raw,
@@ -142,46 +198,69 @@ class BehavioralPatternEngine:
                 ex = self.patterns[best_idx]
                 ex["evidence_count"] = int(ex.get("evidence_count", 1)) + 1
                 ex["last_mentioned"] = now_iso
-                old_conf = float(ex.get("confidence", 0.5))
-                ex["confidence"] = round(min(0.95, old_conf + 0.08), 3)
+                old_conf = float(ex.get("confidence", 0.8))
+                ex["confidence"] = round(min(0.98, old_conf + 0.05), 3)
+                ex["active"] = True  # Promoted to active on 2nd+ hit!
+
                 updated_fields = False
-                if not ex.get("meaning") and meaning:
+                if meaning and len(meaning) > len(ex.get("meaning", "")):
                     ex["meaning"] = meaning
                     updated_fields = True
                 if triggers and not ex.get("trigger_contexts"):
                     ex["trigger_contexts"] = triggers
                     updated_fields = True
+                if domain in VALID_BEHAVIORAL_DOMAINS:
+                    ex["domain"] = domain
                 if updated_fields:
                     ex["_embedding"] = new_emb
+
                 logger.info(
-                    f"🧠 Behavioral pattern reinforced: '{raw[:40]}...' "
+                    f"🧠 Behavioral pattern reinforced & ACTIVE: '{meaning[:50]}' "
                     f"(sim={best_sim:.2f}, count={ex['evidence_count']}, conf={ex['confidence']})"
                 )
             else:
+                is_active_immediately = bool(is_explicit_perm or conf >= 0.92)
                 entry = {
-                    "type": new_pattern.get("type", "habit"),
+                    "type": new_pattern.get("type", "preference"),
+                    "domain": domain,
                     "raw_statement": raw,
                     "meaning": meaning,
                     "trigger_contexts": triggers,
-                    "confidence": round(float(new_pattern.get("confidence", 0.7)), 3),
+                    "confidence": round(conf, 3),
                     "evidence_count": 1,
+                    "active": is_active_immediately,
                     "first_mentioned": now_iso,
                     "last_mentioned": now_iso,
                     "_embedding": new_emb,
                 }
                 self.patterns.append(entry)
-                logger.info(f"🧠 Behavioral pattern added: '{raw[:50]}'")
+                state_label = "ACTIVE" if is_active_immediately else "CANDIDATE (awaiting 2nd confirmation)"
+                logger.info(f"🧠 Behavioral pattern stored [{state_label} | domain={domain}]: '{meaning[:50]}'")
 
             self._invalidate_cache()
             self._save_patterns()
 
-    def get_relevant_patterns(self, query_text: str, mode: str = "agentic"):
-        if not self.patterns or not query_text or not query_text.strip():
+    def get_relevant_patterns(
+        self,
+        query_text: str,
+        mode: str = "agentic",
+        english_query: str = "",
+        domain: str = "",
+    ):
+        if not self.patterns:
+            return []
+
+        clean_domain = (domain or "").strip().lower()
+        if clean_domain == "general_none":
+            return []
+
+        search_text = (english_query or query_text or "").strip()
+        if not search_text:
             return []
 
         try:
             from core.brain.Memory.LifetimeMemory import ltm_engine
-            query_emb = ltm_engine.embed(query_text.strip(), is_query=True)
+            query_emb = ltm_engine.embed(search_text, is_query=True)
         except Exception as e:
             logger.warning(f"BehavioralPatternEngine query embed error: {e}")
             return []
@@ -194,6 +273,20 @@ class BehavioralPatternEngine:
 
         with self._lock:
             for p in self.patterns:
+                if not p.get("active", True):
+                    continue
+
+                p_domain = p.get("domain", "")
+                if clean_domain in VALID_BEHAVIORAL_DOMAINS and p_domain in VALID_BEHAVIORAL_DOMAINS:
+                    if p_domain != clean_domain:
+                        # Allow coding <-> ui_design or scheduling <-> lifestyle crossover only if very high similarity
+                        compatible = (
+                            {clean_domain, p_domain} == {"coding", "ui_design"}
+                            or {clean_domain, p_domain} == {"scheduling", "lifestyle"}
+                        )
+                        if not compatible:
+                            continue
+
                 emb = p.get("_embedding")
                 if not emb:
                     continue
@@ -201,16 +294,23 @@ class BehavioralPatternEngine:
                     sim = 1.0 - float(cosine(query_emb, emb))
                 except Exception:
                     continue
-                if sim < self.similarity_threshold:
+
+                effective_threshold = self.similarity_threshold
+                if clean_domain in VALID_BEHAVIORAL_DOMAINS and p_domain == clean_domain:
+                    effective_threshold = self.similarity_threshold
+                else:
+                    effective_threshold = self.similarity_threshold + 0.04
+
+                if sim < effective_threshold:
                     continue
 
-                conf = float(p.get("confidence", 0.5))
-                score = sim * (0.6 + 0.4 * conf)
+                conf = float(p.get("confidence", 0.85))
+                score = sim * (0.7 + 0.3 * conf)
 
                 try:
                     last_dt = datetime.fromisoformat(p.get("last_mentioned", ""))
                     days_old = max(0, (now - last_dt).days)
-                    decay = max(0.5, 1.0 - (days_old / self.recency_decay_days) * 0.5)
+                    decay = max(0.6, 1.0 - (days_old / self.recency_decay_days) * 0.4)
                     score *= decay
                 except Exception:
                     pass
@@ -229,69 +329,48 @@ class BehavioralPatternEngine:
         current_command: str = "",
         mode: str = "agentic",
         recent_context: str = "",
+        english_query: str = "",
+        domain: str = "",
     ) -> str:
         query_text = (current_command or "").strip()
         if not query_text:
             return ""
 
+        cache_key = f"{query_text}||{english_query}||{domain}"
         with self._lock:
-            if query_text == self._last_query:
+            if cache_key == self._last_cache_key:
                 return self._last_ephemeral_block
 
-        matches = self.get_relevant_patterns(query_text, mode=mode)
+        matches = self.get_relevant_patterns(
+            query_text=query_text,
+            mode=mode,
+            english_query=english_query,
+            domain=domain,
+        )
         if not matches:
             with self._lock:
-                self._last_query = query_text
+                self._last_cache_key = cache_key
                 self._last_ephemeral_block = ""
             return ""
 
         lines = [
-            "╔══════════════════════════════════════════════════════════════════╗",
-            "║ [BEHAVIORAL PATTERNS] — VERBATIM PAST USER STATEMENTS           ║",
-            "║ These are things the user told YOU in PREVIOUS conversations.   ║",
-            "║ They were auto-retrieved by semantic similarity — NOT ALL       ║",
-            "║ are guaranteed to be relevant to the CURRENT command.           ║",
-            "╚══════════════════════════════════════════════════════════════════╝",
-            "",
-            "🔍 MANDATORY RELEVANCE CHECK (do this for EACH pattern below):",
-            "   Q: Does this genuinely help me serve the CURRENT <Mission> better?",
-            "   → YES: Apply it SILENTLY to personalize the output. Never announce it.",
-            "   → NO : COMPLETELY IGNORE. Do NOT mention it. Do NOT force-fit it.",
-            "",
+            "[BEHAVIORAL PATTERNS — VERIFIED USER PREFERENCES]",
+            "Apply the following verified user preferences SILENTLY if they directly fit the current <Mission>:",
         ]
 
         for m in matches:
             p = m["pattern"]
             raw = p.get("raw_statement", "")
             meaning = p.get("meaning", "")
-            conf = int(float(p.get("confidence", 0.5)) * 100)
-            count = int(p.get("evidence_count", 1))
+            p_dom = p.get("domain", "general")
             sim = m["similarity"]
-
-            if sim >= 0.72:
-                hint = "HIGH — likely relevant, use it"
-            elif sim >= 0.60:
-                hint = "MEDIUM — verify carefully before using"
-            else:
-                hint = "LOW — probably unrelated, likely IGNORE"
-
-            lines.append(f'• [PAST STATEMENT] USER PREVIOUSLY SAID: "{raw}"')
-            if meaning:
-                lines.append(f'  → Meaning: {meaning}')
             lines.append(
-                f'  → Confidence: {conf}% | Mentioned {count}x | '
-                f'Similarity to current command: {sim:.2f} ({hint})'
+                f'- [{p_dom.upper()}] {meaning} (User previously stated: "{raw}" | Match: {sim:.2f})'
             )
-            lines.append("")
-
-        lines.append(
-            "⚠️ REMINDER: These are PAST statements — they are CONTEXT, not commands. "
-            "Only use the ones that genuinely help the CURRENT mission. Ignore everything else silently."
-        )
 
         result_block = "\n".join(lines).rstrip()
         with self._lock:
-            self._last_query = query_text
+            self._last_cache_key = cache_key
             self._last_ephemeral_block = result_block
         return result_block
 
@@ -305,9 +384,11 @@ class BehavioralPatternEngine:
     def get_stats(self):
         with self._lock:
             total = len(self.patterns)
+            active = sum(1 for p in self.patterns if p.get("active", True))
             reinforced = sum(1 for p in self.patterns if int(p.get("evidence_count", 1)) >= 2)
             return {
                 "total_patterns": total,
+                "active_patterns": active,
                 "reinforced_patterns": reinforced,
                 "file_path": str(self.patterns_file),
             }

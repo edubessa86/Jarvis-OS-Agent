@@ -2,7 +2,7 @@ import os
 import re
 import json
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import requests
 from dotenv import load_dotenv
 
@@ -10,9 +10,18 @@ from core.logger.logger import logger
 from core.utils.utils import resolve_pronouns
 from core.brain.Processor.FastBrain import fetch_from_groq, make_result
 from core.brain.Processor.AgenticBrain import run_agentic_loop
-from core.brain.config import ROUTER_API_KEY, ROUTER_MODEL, ROUTER_ENDPOINT, FAST_BRAIN_API_KEY, FAST_BRAIN_MODEL, FAST_BRAIN_ENDPOINT
+from core.brain.config import (
+    ROUTER_API_KEY,
+    ROUTER_MODEL,
+    ROUTER_ENDPOINT,
+    FAST_BRAIN_API_KEY,
+    FAST_BRAIN_MODEL,
+    FAST_BRAIN_ENDPOINT,
+)
 
 load_dotenv()
+
+VALID_DOMAINS = {"coding", "scheduling", "communication", "ui_design", "lifestyle", "general_none"}
 
 
 class GenericSemanticRouter:
@@ -26,9 +35,9 @@ class GenericSemanticRouter:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             })
-        self.timeout = 2.0
+        self.timeout = 2.5
 
-    def analyze_route(self, command: str, history_context: str = "") -> Optional[str]:
+    def analyze_route_full(self, command: str, history_context: str = "") -> Optional[Dict[str, str]]:
         if not self.api_key:
             return None
 
@@ -36,14 +45,19 @@ class GenericSemanticRouter:
 
         system_prompt = (
             "You are an enterprise AI semantic router. Classify the CURRENT user command into strict JSON "
-            "with a single key 'route' having value either 'FAST' or 'AGENTIC'.\n\n"
+            "with three keys:\n"
+            "1. 'route': Either 'FAST' or 'AGENTIC'.\n"
+            "2. 'english_query': A concise 4-10 word pure English translation of the user's core intent (strip Hinglish/fillers).\n"
+            "3. 'domain': Choose strictly ONE personalization domain from: "
+            "['coding', 'scheduling', 'communication', 'ui_design', 'lifestyle', 'general_none'].\n"
+            "   - Use 'scheduling' ONLY for study plans, timetables, routines, or productivity schedules.\n"
+            "   - Use 'coding' ONLY for writing code, building apps/scripts, or debugging.\n"
+            "   - Use 'ui_design' ONLY for designing web pages, dashboards, CSS, or frontend layouts.\n"
+            "   - Use 'communication' ONLY for drafting/sending emails, WhatsApp, or Telegram messages.\n"
+            "   - Use 'lifestyle' ONLY for workout, diet, health, or daily habit advice.\n"
+            "   - Use 'general_none' for EVERYTHING ELSE (factual lookups, weather, opening apps, hardware control, reading files, memory recall, terminal commands).\n\n"
             "CRITICAL RULE: Evaluate ONLY the [USER COMMAND] for routing. Use [RECENT CONVERSATION HISTORY] purely for context. "
             "If the new command contains MULTIPLE intents, ALWAYS prioritize routing to 'AGENTIC'.\n\n"
-            "### CRITICAL INTENT EXTRACTION\n"
-            "Ignore wake words, names, and conversational fillers (e.g., 'Hi', 'Hello', 'Jarvis', 'Please', 'Bhai'). "
-            "Focus strictly on the CORE ACTION of the command. If the core action requires complex execution "
-            "(email, files, terminal), route to 'AGENTIC'. If the command is purely a greeting with no action, "
-            "or a simple lookup, route to 'FAST'.\n\n"
             "### FAST BRAIN RULES (ROUTE TO 'FAST' ONLY IF STRICTLY THESE)\n"
             "- Casual conversation, greetings, jokes, time, date, or personal chit-chat.\n"
             "- Simple hardware controls: volume up/down/mute, brightness, screen lock, sleep, or screenshots.\n"
@@ -63,16 +77,12 @@ class GenericSemanticRouter:
             "- Image/Screen analysis.\n"
             "- ANY command modifying or analyzing a local file/system state.\n\n"
             "### FEW-SHOT EXAMPLES\n"
-            "User: 'Hello Jarvis' -> {\"route\": \"FAST\"}\n"
-            "User: 'Hi Jarvis, volume badha do' -> {\"route\": \"FAST\"}\n"
-            "User: 'Hello Jarvis, mere desktop par ek test.txt file banao' -> {\"route\": \"AGENTIC\"}\n"
-            "User: 'Jarvis, Kaif ko email bhej do ki main late aaunga' -> {\"route\": \"AGENTIC\"}\n"
-            "User: 'Email account kaise banate hai?' -> {\"route\": \"FAST\"}\n"
-            "User: 'React app kaise banate hai?' -> {\"route\": \"AGENTIC\"}\n"
-            "User: 'Chrome kholo aur aaj ka weather search karo' -> {\"route\": \"FAST\"}\n"
-            "User: 'Is YouTube link ka video summary batao' -> {\"route\": \"AGENTIC\"}\n"
-            "User: 'Is image mein kya likha hai?' -> {\"route\": \"AGENTIC\"}\n"
-            "User: 'Weather check karo aur ek python script likho' -> {\"route\": \"AGENTIC\"}"
+            "User: 'Hello Jarvis' -> {\"route\": \"FAST\", \"english_query\": \"greeting hello\", \"domain\": \"general_none\"}\n"
+            "User: 'Hi Jarvis, volume badha do' -> {\"route\": \"FAST\", \"english_query\": \"increase system volume\", \"domain\": \"general_none\"}\n"
+            "User: 'Mera 7 din ka study plan banao' -> {\"route\": \"AGENTIC\", \"english_query\": \"create a 7 day study schedule plan\", \"domain\": \"scheduling\"}\n"
+            "User: 'Jarvis, Kaif ko email bhej do ki main late aaunga' -> {\"route\": \"AGENTIC\", \"english_query\": \"send email to Kaif about being late\", \"domain\": \"communication\"}\n"
+            "User: 'Mere liye ek portfolio dashboard banao' -> {\"route\": \"AGENTIC\", \"english_query\": \"build a portfolio web dashboard\", \"domain\": \"ui_design\"}\n"
+            "User: 'Mere father ka naam kya hai?' -> {\"route\": \"AGENTIC\", \"english_query\": \"what is my father name\", \"domain\": \"general_none\"}"
         )
 
         user_content = f"[RECENT CONVERSATION HISTORY]\n{trimmed_history}\n\n[USER COMMAND]\n\"{command}\""
@@ -84,7 +94,7 @@ class GenericSemanticRouter:
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.0,
-            "max_tokens": 15,
+            "max_tokens": 60,
             "response_format": {"type": "json_object"}
         }
 
@@ -100,9 +110,15 @@ class GenericSemanticRouter:
             if response.status_code == 200:
                 raw_json = response.json()["choices"][0]["message"]["content"]
                 data = json.loads(raw_json)
-                route = data.get("route", "FAST").strip().upper()
-                logger.info(f"Semantic Router [{latency_ms:.1f}ms] | Decision -> {route}")
-                return "AGENTIC" if route == "AGENTIC" else "FAST"
+                route = "AGENTIC" if str(data.get("route", "FAST")).strip().upper() == "AGENTIC" else "FAST"
+                eng_q = str(data.get("english_query") or command).strip()
+                domain = str(data.get("domain") or "general_none").strip().lower()
+                if domain not in VALID_DOMAINS:
+                    domain = "general_none"
+                logger.info(
+                    f"Semantic Router [{latency_ms:.1f}ms] | Decision -> {route} | Domain -> {domain} | Eng -> '{eng_q[:45]}'"
+                )
+                return {"route": route, "english_query": eng_q, "domain": domain}
             else:
                 logger.warning(f"Router API non-200 status ({response.status_code}): {response.text[:100]}")
 
@@ -115,7 +131,7 @@ class GenericSemanticRouter:
                         "Authorization": f"Bearer {FAST_BRAIN_API_KEY}",
                         "Content-Type": "application/json"
                     })
-                    
+
                     fallback_payload = {
                         "model": FAST_BRAIN_MODEL,
                         "messages": [
@@ -123,10 +139,10 @@ class GenericSemanticRouter:
                             {"role": "user", "content": user_content}
                         ],
                         "temperature": 0.0,
-                        "max_tokens": 15,
+                        "max_tokens": 60,
                         "response_format": {"type": "json_object"}
                     }
-                    
+
                     start_ts_fb = time.perf_counter()
                     response_fb = fallback_session.post(
                         f"{FAST_BRAIN_ENDPOINT}/chat/completions",
@@ -134,13 +150,19 @@ class GenericSemanticRouter:
                         timeout=self.timeout
                     )
                     latency_ms_fb = (time.perf_counter() - start_ts_fb) * 1000
-                    
+
                     if response_fb.status_code == 200:
                         raw_json_fb = response_fb.json()["choices"][0]["message"]["content"]
                         data_fb = json.loads(raw_json_fb)
-                        route_fb = data_fb.get("route", "FAST").strip().upper()
-                        logger.info(f"Tier 2 Semantic Router (Fast Brain) [{latency_ms_fb:.1f}ms] | Decision -> {route_fb}")
-                        return "AGENTIC" if route_fb == "AGENTIC" else "FAST"
+                        route_fb = "AGENTIC" if str(data_fb.get("route", "FAST")).strip().upper() == "AGENTIC" else "FAST"
+                        eng_q_fb = str(data_fb.get("english_query") or command).strip()
+                        domain_fb = str(data_fb.get("domain") or "general_none").strip().lower()
+                        if domain_fb not in VALID_DOMAINS:
+                            domain_fb = "general_none"
+                        logger.info(
+                            f"Tier 2 Semantic Router [{latency_ms_fb:.1f}ms] | Decision -> {route_fb} | Domain -> {domain_fb}"
+                        )
+                        return {"route": route_fb, "english_query": eng_q_fb, "domain": domain_fb}
                     else:
                         logger.warning(f"Tier 2 Router API non-200 status ({response_fb.status_code}): {response_fb.text[:100]}")
             except Exception as e2:
@@ -148,8 +170,27 @@ class GenericSemanticRouter:
 
         return None
 
+    def analyze_route(self, command: str, history_context: str = "") -> Optional[str]:
+        res = self.analyze_route_full(command, history_context)
+        return res["route"] if res else None
+
 
 router_engine = GenericSemanticRouter()
+
+
+def infer_local_domain(command: str) -> str:
+    cmd_lower = command.lower().strip()
+    if re.search(r'\b(schedule|timetable|study plan|routine|plan|time table|slots)\b', cmd_lower):
+        return "scheduling"
+    if re.search(r'\b(dashboard|ui|frontend|css|html|website|webpage|design|layout|theme)\b', cmd_lower):
+        return "ui_design"
+    if re.search(r'\b(python|script|code|function|class|bug|debug|react|server|api)\b', cmd_lower):
+        return "coding"
+    if re.search(r'\b(email|mail|gmail|whatsapp|telegram|message|msg|draft|write to|bhejo)\b', cmd_lower):
+        return "communication"
+    if re.search(r'\b(workout|diet|exercise|gym|health|sleep routine)\b', cmd_lower):
+        return "lifestyle"
+    return "general_none"
 
 
 def get_local_fallback_route(command: str) -> str:
@@ -161,9 +202,9 @@ def get_local_fallback_route(command: str) -> str:
         r'\b(play|chalao|song|gana|music|youtube)\b',
         r'\b(weather|mausam|time|date|score|news|joke)\b',
         r'\b(hi|hello|hey|kaise ho|what is up|good morning|good evening)\b',
-        r'^\s*(what is|kya hai|kya hota hai|who is|kaun hai)\s+\w+\s*$' # strictly short general queries
+        r'^\s*(what is|kya hai|kya hota hai|who is|kaun hai)\s+\w+\s*$'
     ]
-    
+
     agentic_strict_patterns = [
         r'\b(write|run|execute|create|make|banao|likho|chalao).{0,30}(python|script|code|file|folder|dir|react|app|server)\b',
         r'\b(send|write|bhejo|read|check|karo).{0,30}(email|mail|gmail|whatsapp|msg|message|telegram)\b',
@@ -178,17 +219,14 @@ def get_local_fallback_route(command: str) -> str:
         r'\b(kaise).{0,30}(code|banayein|fix|error|install)\b'
     ]
 
-    # Priority 1: Check for explicit agentic keywords
     for pattern in agentic_strict_patterns:
         if re.search(pattern, cmd_lower):
             return "AGENTIC"
 
-    # Priority 2: Check for explicit fast keywords
     for pattern in absolute_fast_patterns:
         if re.search(pattern, cmd_lower):
             return "FAST"
 
-    # Priority 3: If multiple verbs/actions are detected, default to Agentic (Compound command)
     action_words = re.findall(r'\b(and|aur|then|phir|baad mein)\b', cmd_lower)
     if len(action_words) > 0:
         return "AGENTIC"
@@ -204,6 +242,8 @@ def get_route_decision(command: str, memory_instance=None) -> str:
             if re.search(confirm_pattern, cmd_lower):
                 memory_instance.ephemeral["waiting_for_confirmation"] = False
                 memory_instance.ephemeral["proactive_confirmed"] = True
+                memory_instance.ephemeral["current_english_query"] = command
+                memory_instance.ephemeral["current_domain"] = "general_none"
                 logger.info("Proactive Confirmation detected -> Routing directly to AGENTIC")
                 return "AGENTIC"
             else:
@@ -220,12 +260,19 @@ def get_route_decision(command: str, memory_instance=None) -> str:
         except Exception:
             history_context = ""
 
-    cloud_decision = router_engine.analyze_route(command, history_context)
-    if cloud_decision:
-        return cloud_decision
+    cloud_result = router_engine.analyze_route_full(command, history_context)
+    if cloud_result:
+        if memory_instance and hasattr(memory_instance, "ephemeral"):
+            memory_instance.ephemeral["current_english_query"] = cloud_result.get("english_query", command)
+            memory_instance.ephemeral["current_domain"] = cloud_result.get("domain", "general_none")
+        return cloud_result["route"]
 
     logger.info("Using Local Rule-Based Fallback Router...")
-    return get_local_fallback_route(command)
+    fallback_route = get_local_fallback_route(command)
+    if memory_instance and hasattr(memory_instance, "ephemeral"):
+        memory_instance.ephemeral["current_english_query"] = command
+        memory_instance.ephemeral["current_domain"] = infer_local_domain(command)
+    return fallback_route
 
 
 def fetch_hybrid_response(raw_command: str, memory_instance=None) -> Optional[Dict[str, any]]:

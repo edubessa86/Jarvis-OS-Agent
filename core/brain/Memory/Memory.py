@@ -27,17 +27,28 @@ class ContextMemory:
         "open ", "close ", "play ", "kholo", "band ", "send ", "bhej",
         "write ", "run ", "execute ", "search ", "find ", "check ",
         "screenshot", "lock ", "sleep ", "volume", "brightness",
-        "email ", "whatsapp ", "telegram ", "message ",
+        "email ", "whatsapp ", "telegram ", "message ", "create ", "make ", "banao",
     )
 
-    _MEMORY_SIGNAL_PATTERNS = [
+    _QUESTION_STARTERS = re.compile(
+        r"^\s*(?:jarvis\s+|bhai\s+|hey\s+|hi\s+|hello\s+|please\s+)*"
+        r"(?:kya|kab|kaise|kahan|kaun|kisne|kisko|kitna|kitne|kyu|kyun|"
+        r"what|who|when|where|why|how|which|can\s+you|could\s+you|will\s+you|do\s+you|is\s+there|tell\s+me)\b",
+        re.IGNORECASE,
+    )
+
+    _SELF_PRONOUN_PATTERN = re.compile(
         r"\b(mai|main|mein|hum|mujhe|mera|meri|mere|i|my|me)\b",
+        re.IGNORECASE,
+    )
+
+    _DURABLE_FACT_OR_HABIT_PATTERNS = [
         r"\b(raat|subah|shaam|dopahar|morning|evening|night|afternoon|late\s*night)\b",
         r"\b\d{1,2}\s*(?:bje|bajey|baj|o'?clock|pm|am)\b",
         r"\b(roz|rozana|hamesha|aksar|usually|always|mostly|daily|every\s*day|every\s*morning|every\s*night|never|kabhi\s*nahi|kabhi\s*mat)\b",
-        r"\b(pasand|prefer|like|love|hate|dislike|chahiye|routine|habit|aadat|schedule|tone|style)\b",
+        r"\b(pasand|prefer|like|love|hate|dislike|routine|habit|aadat|schedule|tone|style|favorite|favourite)\b",
         r"\b(yaad\s*rakhna|remember\s*that|from\s*now\s*on|aage\s*se)\b",
-        r"\b(naam|name|bhai|behen|dost|father|mother|sister|brother|boss|friend|rehta|live|study|college|number|email|phone|project)\b",
+        r"\b(naam|name|bhai|behen|dost|father|mother|sister|brother|boss|friend|rehta|rehti|live|study|college|number|email|phone|project|kaam\s*karta)\b",
     ]
 
     def __init__(self, memory_path="Data/jarvis_memory"):
@@ -97,22 +108,30 @@ class ContextMemory:
         words = low.split()
         if len(words) < 3:
             return False
-        if low.endswith("?") and not any(re.search(p, low) for p in self._MEMORY_SIGNAL_PATTERNS[:1]):
+
+        # Rule 1: Never extract memories from questions unless user explicitly says 'yaad rakhna' / 'remember'
+        explicit_remember = bool(
+            re.search(r"\b(yaad\s*rakhna|remember\s*that|from\s*now\s*on|aage\s*se|hamesha|always|never|kabhi\s*mat)\b", low)
+        )
+        if (low.endswith("?") or self._QUESTION_STARTERS.search(low)) and not explicit_remember:
             return False
-        has_signal = any(re.search(p, low) for p in self._MEMORY_SIGNAL_PATTERNS)
+
+        # Rule 2: Imperative commands only pass if they contain explicit permanent habit/preference overrides
         if any(low.startswith(prefix) for prefix in self._COMMAND_PREFIXES):
-            strong_override = re.search(
-                r"\b(hamesha|always|never|kabhi\s*nahi|kabhi\s*mat|yaad\s*rakhna|remember|from\s*now\s*on|aage\s*se|pasand|prefer|routine|aadat|roz|daily)\b",
-                low
-            )
-            return bool(strong_override)
-        return has_signal
+            return explicit_remember
+
+        # Rule 3: Require BOTH a self-reference AND a durable fact/habit indicator (or explicit remember)
+        has_self_ref = bool(self._SELF_PRONOUN_PATTERN.search(low))
+        has_durable_signal = any(re.search(p, low) for p in self._DURABLE_FACT_OR_HABIT_PATTERNS)
+
+        return bool(explicit_remember or (has_self_ref and has_durable_signal))
 
     def _is_valid_triplet(self, src, rel, tgt):
         invalid_entities = {
             "agent", "info", "system", "jarvis", "data", "unknown",
             "yes", "no", "today", "tomorrow", "now", "thing", "stuff",
-            "morning", "evening", "night", "afternoon", "subah", "raat", "shaam"
+            "morning", "evening", "night", "afternoon", "subah", "raat", "shaam",
+            "none", "null", "true", "false"
         }
         if src.lower() in invalid_entities or tgt.lower() in invalid_entities:
             return False
@@ -259,14 +278,18 @@ class ContextMemory:
             devices = self.ephemeral.get("connected_devices") or []
             last_img = self.ephemeral.get("last_generated_image")
             last_shot = self.ephemeral.get("last_screenshot")
+            english_query = self.ephemeral.get("current_english_query", "")
+            domain = self.ephemeral.get("current_domain", "")
 
             beh_block = ""
-            if mode != "fast":
+            if mode != "fast" and domain != "general_none":
                 try:
                     from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
                     beh_block = behavioral_pattern_engine.format_ephemeral_block(
                         current_command=current_command,
                         mode=mode,
+                        english_query=english_query,
+                        domain=domain,
                     )
                 except Exception as e:
                     logger.error(f"Behavioral ephemeral inject error ({mode}): {e}")
@@ -314,7 +337,7 @@ class ContextMemory:
     def _load_json(self, file_path, default):
         try:
             if file_path.exists():
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     return json.load(f)
             return default
         except Exception as e:
@@ -325,7 +348,7 @@ class ContextMemory:
         history = []
         if file_path.exists():
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
+                with open(file_path, "r", encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
                             history.append(json.loads(line))
@@ -336,7 +359,7 @@ class ContextMemory:
     def _append_history_jsonl(self, file_path, entry):
         with self._lock:
             try:
-                with open(file_path, 'a', encoding='utf-8') as f:
+                with open(file_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except Exception as e:
                 logger.error(f"Failed to append to JSONL {file_path}: {e}")
@@ -344,7 +367,7 @@ class ContextMemory:
     def _rewrite_history_jsonl(self, file_path, data_list):
         with self._lock:
             try:
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, "w", encoding="utf-8") as f:
                     for entry in data_list:
                         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except Exception as e:
@@ -354,16 +377,16 @@ class ContextMemory:
         summaries = {}
         if self.daily_summaries_file.exists():
             try:
-                with open(self.daily_summaries_file, 'r', encoding='utf-8') as f:
+                with open(self.daily_summaries_file, "r", encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
                             entry = json.loads(line)
-                            date_key = entry.get('date')
+                            date_key = entry.get("date")
                             if date_key:
                                 summaries[date_key] = {
-                                    "summary": entry.get('summary', ''),
-                                    "message_count": entry.get('message_count', 0),
-                                    "generated_at": entry.get('generated_at', '')
+                                    "summary": entry.get("summary", ""),
+                                    "message_count": entry.get("message_count", 0),
+                                    "generated_at": entry.get("generated_at", "")
                                 }
             except Exception as e:
                 logger.error(f"Failed to load daily summaries: {e}")
@@ -378,7 +401,7 @@ class ContextMemory:
                     "message_count": message_count,
                     "generated_at": datetime.now().isoformat()
                 }
-                with open(self.daily_summaries_file, 'a', encoding='utf-8') as f:
+                with open(self.daily_summaries_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 self.daily_summaries[date_str] = {
                     "summary": summary,
@@ -391,7 +414,7 @@ class ContextMemory:
     def _rewrite_daily_summaries(self):
         with self._lock:
             try:
-                with open(self.daily_summaries_file, 'w', encoding='utf-8') as f:
+                with open(self.daily_summaries_file, "w", encoding="utf-8") as f:
                     for date_key in sorted(self.daily_summaries.keys()):
                         data = self.daily_summaries[date_key]
                         entry = {
@@ -409,7 +432,7 @@ class ContextMemory:
             return datetime.now().strftime("%Y-%m-%d")
         try:
             last = self.master_history[-1]
-            ts = datetime.fromisoformat(last.get('timestamp', ''))
+            ts = datetime.fromisoformat(last.get("timestamp", ""))
             return ts.strftime("%Y-%m-%d")
         except Exception:
             return datetime.now().strftime("%Y-%m-%d")
@@ -418,7 +441,7 @@ class ContextMemory:
         messages = []
         for msg in self.master_history:
             try:
-                ts = datetime.fromisoformat(msg.get('timestamp', ''))
+                ts = datetime.fromisoformat(msg.get("timestamp", ""))
                 if ts.strftime("%Y-%m-%d") == date_str:
                     messages.append(msg)
             except Exception:
@@ -444,8 +467,8 @@ class ContextMemory:
 
                 conversation_lines = []
                 for msg in messages:
-                    role = msg.get('role', 'UNKNOWN')
-                    message = msg.get('message', '')
+                    role = msg.get("role", "UNKNOWN")
+                    message = msg.get("message", "")
                     if not message:
                         continue
                     conversation_lines.append(f"{role}: {message}")
@@ -498,7 +521,7 @@ class ContextMemory:
             day_groups = {}
             for msg in self.master_history:
                 try:
-                    ts = datetime.fromisoformat(msg.get('timestamp', ''))
+                    ts = datetime.fromisoformat(msg.get("timestamp", ""))
                     msg_date = ts.date()
                     if msg_date < today:
                         day_key = msg_date.strftime("%Y-%m-%d")
@@ -564,45 +587,33 @@ class ContextMemory:
 Analyze the user's latest message using the recent conversation context and classify durable knowledge into TWO STRICTLY SEPARATE memory systems based on HOW Jarvis will retrieve and use it in the future:
 
 ======================================================================
+CRITICAL ZERO-FALSE-POSITIVE GATE (CHECK THIS FIRST!)
+======================================================================
+- ONE-TIME TASK INSTRUCTIONS ARE NOT MEMORIES: If the user is giving instructions, constraints, or styling for a CURRENT task right now (e.g., "ek dark mode website banao", "is mail ko short rakhna", "mere desktop par test.py banao"), set `is_current_task_instruction`: true, `has_ltm_facts`: false, and `has_behavioral_patterns`: false!
+- QUESTIONS ARE NOT MEMORIES: Never extract facts from a user question.
+- 1-YEAR STABILITY TEST: Only extract facts/habits that will still be true 6-12 months from now. Ignore temporary moods ("aaj thak gaya hu") or today's one-off plans ("aaj raat movie dekhunga").
+
+======================================================================
 SYSTEM 1: LTM GRAPH TRIPLETS (`ltm_triplets`) — Active "Pull" Lookup
 ======================================================================
-Jarvis only searches the LTM Graph when explicitly asked a "Who / What / Where / Which" question via the `memory_actions` tool.
-EXTRACT INTO `ltm_triplets` ONLY IF IT IS A STATIC ENTITY FACT:
+EXTRACT INTO `ltm_triplets` ONLY IF IT IS A STATIC ENTITY FACT (confidence >= 0.85):
 - Identity & Demographics (Name, Age, City, College, Degree, Profession).
 - Relationships (Family, Friends, Boss, Colleagues — e.g., "Rahul mera bhai hai").
 - Contact Info (Phone numbers, Emails, Addresses — use HAS_PHONE, HAS_EMAIL, LIVES_IN).
 - Owned Assets & Hardware Specs (Laptop model, RAM, Phone model, Vehicles).
 - Named Projects & Creations (e.g., "Mai GhostVault project bana raha hu" -> `[User] --(DEVELOPS)--> [GhostVault]`).
-- Pure Static Noun Favorites with NO time/workflow/situational context (e.g., "Mera favorite food Biryani hai").
-
-NEVER PUT IN `ltm_triplets`:
-- Time-based preferences, coding hours, daily routines, sleep/wake times, work habits, or communication style preferences.
+- Set `is_singular`: true if only ONE value can be true at a time (e.g., LIVES_IN, AGE, FATHER, MOTHER, WORKS_AT, HAS_PHONE, COLLEGE).
 
 ======================================================================
 SYSTEM 2: BEHAVIORAL PATTERNS (`behavioral_patterns`) — Passive "Push" Auto-RAG
 ======================================================================
-Behavioral patterns are automatically injected into Jarvis's prompt via semantic similarity whenever the user asks Jarvis to plan, schedule, code, design, draft messages, or suggest workflows.
-EXTRACT INTO `behavioral_patterns` ONLY IF IT GUIDES HOW/WHEN JARVIS SHOULD PERSONALIZE TASKS:
-- Time & Energy Routines: When the user likes to code, study, work, wake up, or rest (e.g., "mujhe subah coding krna pasand hai", "raat 8 bje Jarvis pe kaam karta hu").
-- Frequency Habits: What the user does daily/regularly (e.g., "har subah walk pe jata hu").
-- Workflow, Coding & UI Preferences: Preferred tech stack, IDE, UI style, theme, or coding habits that Jarvis should silently apply when building things (e.g., "mujhe dark mode glassmorphism pasand hai", "code me comments mat daalna").
-- Communication & Tone Preferences: How the user wants emails, messages, or AI replies formatted (e.g., "email me formal tone nahi chahiye, short rakho").
-- Situational Dislikes/Constraints: Things to avoid when scheduling or executing tasks (e.g., "subah meetings mat rakhna").
-
-======================================================================
-CRITICAL MUTUAL EXCLUSION & DYNAMIC SPLIT RULES
-======================================================================
-1. ZERO DUPLICATION: The exact same piece of information MUST NEVER be placed in both `ltm_triplets` and `behavioral_patterns`.
-2. ACTIVITY + TIME/PREFERENCE = 100% BEHAVIORAL:
-   Example: "bhai mujhe subah coding krna pasand hai"
-   -> `has_ltm_facts`: false, `ltm_triplets`: []
-   -> `has_behavioral_patterns`: true (because knowing the user likes morning coding is needed automatically when Jarvis builds a schedule or plans a project).
-3. COMPOUND SENTENCE SPLIT:
-   Example: "Mai apne naye project GhostVault par roz raat 8 bje kaam karta hu"
-   -> Extract static entity ownership into `ltm_triplets`: `User --(DEVELOPS)--> GhostVault`
-   -> Extract time routine into `behavioral_patterns`: "User works on Project GhostVault daily at 8 PM"
-4. 1-YEAR STABILITY TEST: Ignore one-time plans ("aaj raat movie dekhunga"), temporary moods ("aaj thak gaya hu"), or direct OS commands ("Chrome khol do"). Return false for both if nothing is permanent/stable.
-5. TRIGGER CONTEXTS (CRITICAL FOR RAG): For every behavioral pattern, populate `trigger_contexts` with 5-8 comma-separated future task scenarios, user goals, or request keywords where Jarvis MUST recall this pattern (e.g., for "mujhe subah coding krna pasand hai", write: "best schedule, daily timetable, starting a new project, planning coding hours, productivity routine, study plan, work slots").
+EXTRACT INTO `behavioral_patterns` ONLY IF IT IS A RECURRING HABIT OR GENERAL WORKFLOW PREFERENCE (confidence >= 0.85):
+- Time & Energy Routines: When the user generally likes to code, study, work, wake up, or rest (e.g., "mujhe subah coding krna pasand hai", "roz raat 8 bje Jarvis pe kaam karta hu").
+- Workflow, Coding & UI Preferences: General preferred tech stack, UI style, theme, or coding habits (e.g., "mujhe hamesha dark mode glassmorphism pasand hai", "mere code me comments mat daala karo").
+- Communication & Tone Preferences: How the user generally wants emails, messages, or AI replies formatted.
+- Classify `domain` strictly into ONE of: `"coding"`, `"scheduling"`, `"communication"`, `"ui_design"`, `"lifestyle"`.
+- Set `is_explicit_permanent`: true ONLY if the user explicitly used permanent words like "hamesha", "roz", "daily", "always", "never", "kabhi mat", "yaad rakhna", "meri aadat hai".
+- Write `meaning` and `trigger_contexts` in 100% PURE ENGLISH (no Hinglish words) so the English embedding model can match them accurately.
 
 [EXISTING GRAPH RELATIONS (Reuse if applicable for LTM)]:
 {existing_relations_str}
@@ -617,13 +628,15 @@ CRITICAL MUTUAL EXCLUSION & DYNAMIC SPLIT RULES
 
 Return STRICT JSON matching this exact schema:
 {{
-  "reasoning": "Brief 1-sentence explanation of why this belongs to LTM, Behavioral, both (split), or neither.",
+  "reasoning": "Brief 1-sentence explanation of why this is a one-time task instruction, LTM fact, Behavioral pattern, or neither.",
+  "is_current_task_instruction": boolean,
   "has_ltm_facts": boolean,
   "ltm_triplets": [
     {{
       "source": "Entity1",
       "relation": "UPPERCASE_RELATION",
       "target": "Entity2",
+      "is_singular": boolean,
       "metadata": {{
         "confidence": 0.9,
         "context": "Brief context",
@@ -639,10 +652,12 @@ Return STRICT JSON matching this exact schema:
   "behavioral_patterns": [
     {{
       "type": "routine|preference|habit|dislike",
+      "domain": "coding|scheduling|communication|ui_design|lifestyle",
+      "is_explicit_permanent": boolean,
       "raw_statement": "Verbatim user quote from the message",
-      "meaning": "Clear one-line English interpretation of the behavior/preference",
-      "trigger_contexts": "Comma-separated future user requests/tasks where Jarvis should apply this pattern",
-      "confidence": 0.8
+      "meaning": "Clear one-line PURE ENGLISH interpretation of the behavior/preference",
+      "trigger_contexts": "4-6 specific pure English task scenarios where Jarvis should apply this pattern",
+      "confidence": 0.9
     }}
   ]
 }}"""
@@ -660,8 +675,12 @@ Return STRICT JSON matching this exact schema:
                         response_format={"type": "json_object"}
                     )
                     raw_text = response.choices[0].message.content.strip()
-                    clean_text = re.sub(r'^```json\n|```$', '', raw_text, flags=re.MULTILINE).strip()
+                    clean_text = re.sub(r"^```json\n|```$", "", raw_text, flags=re.MULTILINE).strip()
                     data = json.loads(clean_text)
+
+                    if data.get("is_current_task_instruction") is True:
+                        logger.info(f"🧠 Hybrid Extraction skipped (Current Task Instruction): {data.get('reasoning', '')}")
+                        break
 
                     logger.info(
                         f"🧠 Hybrid Extraction | LTM={data.get('has_ltm_facts')} ({len(data.get('ltm_triplets', []))}) "
@@ -677,19 +696,32 @@ Return STRICT JSON matching this exact schema:
                                     src = str(t.get("source", "")).strip().title()
                                     rel = str(t.get("relation", "")).strip().upper()
                                     tgt = str(t.get("target", "")).strip().title()
-                                    metadata = t.get("metadata", {})
+                                    is_singular = bool(t.get("is_singular", False))
+                                    metadata = t.get("metadata", {}) or {}
+                                    conf = float(metadata.get("confidence", 0.0))
                                     inverse = t.get("inverse")
+
+                                    if conf < 0.85:
+                                        logger.debug(f"🧠 LTM Triplet rejected (conf={conf:.2f} < 0.85): [{src}] --({rel})--> [{tgt}]")
+                                        continue
 
                                     if not (src and rel and tgt) or not self._is_valid_triplet(src, rel, tgt):
                                         continue
 
                                     with ltm_engine._lock:
                                         if ltm_engine.graph.has_edge(src, tgt):
-                                            existing_rel = ltm_engine.graph.edges[src, tgt].get('relation')
-                                            if existing_rel == 'HAS_RELATION' and rel != 'HAS_RELATION':
+                                            existing_rel = ltm_engine.graph.edges[src, tgt].get("relation")
+                                            if existing_rel == "HAS_RELATION" and rel != "HAS_RELATION":
                                                 ltm_engine.graph.remove_edge(src, tgt)
-                                        ltm_engine.record_triplet(src, rel, tgt, metadata=metadata, inverse=inverse)
-                                        logger.info(f"LTM Final DB Entry: [{src}] --({rel})--> [{tgt}]")
+                                        ltm_engine.record_triplet(
+                                            src,
+                                            rel,
+                                            tgt,
+                                            metadata=metadata,
+                                            inverse=inverse,
+                                            is_singular=is_singular,
+                                        )
+                                        logger.info(f"LTM Final DB Entry: [{src}] --({rel})--> [{tgt}] (conf={conf:.2f})")
                             except Exception as e:
                                 logger.error(f"LTM Engine Save Error: {e}")
 
@@ -700,6 +732,8 @@ Return STRICT JSON matching this exact schema:
                                 from core.brain.Memory.BehavioralEngine import behavioral_pattern_engine
                                 for p in patterns:
                                     if not isinstance(p, dict):
+                                        continue
+                                    if float(p.get("confidence", 0.0)) < 0.85:
                                         continue
                                     if not p.get("raw_statement"):
                                         p["raw_statement"] = message.strip()
@@ -735,7 +769,7 @@ Return STRICT JSON matching this exact schema:
             day_groups = {}
             for msg in history_snapshot:
                 try:
-                    ts = datetime.fromisoformat(msg.get('timestamp', now.isoformat()))
+                    ts = datetime.fromisoformat(msg.get("timestamp", now.isoformat()))
                     if ts < raw_cutoff:
                         day_key = ts.strftime("%Y-%m-%d")
                         day_groups.setdefault(day_key, []).append(msg)
@@ -750,7 +784,7 @@ Return STRICT JSON matching this exact schema:
                 filtered_history = []
                 for msg in self.master_history:
                     try:
-                        msg_time = datetime.fromisoformat(msg.get('timestamp', now.isoformat()))
+                        msg_time = datetime.fromisoformat(msg.get("timestamp", now.isoformat()))
                         if msg_time >= raw_cutoff:
                             filtered_history.append(msg)
                     except Exception:
@@ -826,9 +860,7 @@ Return STRICT JSON matching this exact schema:
             if self.last_message_date != today_key:
                 old_date = self.last_message_date
                 self.last_message_date = today_key
-                if old_date and old_date in self.daily_summaries:
-                    pass
-                else:
+                if old_date and old_date not in self.daily_summaries:
                     threading.Thread(
                         target=self._generate_daily_summary,
                         args=(old_date,),
@@ -843,10 +875,10 @@ Return STRICT JSON matching this exact schema:
             logger.error(f"Error adding message to memory: {e}")
 
     def _format_entry(self, entry, dt):
-        time_str = dt.strftime('%d %b, %H:%M')
-        role = entry.get('role', 'UNKNOWN')
-        message = entry.get('message', '')
-        metadata = entry.get('metadata', {})
+        time_str = dt.strftime("%d %b, %H:%M")
+        role = entry.get("role", "UNKNOWN")
+        message = entry.get("message", "")
+        metadata = entry.get("metadata", {})
 
         if role == "CONVERSATION":
             block = f"[{time_str}]\n{message}"
@@ -885,12 +917,12 @@ Return STRICT JSON matching this exact schema:
         try:
             history_str = []
             for entry in recent_entries:
-                time_str = datetime.fromisoformat(entry.get('timestamp', datetime.now().isoformat())).strftime('%H:%M')
-                if entry.get('role') == "CONVERSATION":
+                time_str = datetime.fromisoformat(entry.get("timestamp", datetime.now().isoformat())).strftime("%H:%M")
+                if entry.get("role") == "CONVERSATION":
                     line = f"[{time_str}] {entry.get('message', '')}"
                 else:
                     line = f"[{time_str}] {entry.get('role', 'UNKNOWN')}: {entry.get('message', '')}"
-                metadata = entry.get('metadata', {})
+                metadata = entry.get("metadata", {})
                 if isinstance(metadata, dict):
                     meta_parts = []
                     if metadata.get("apps_opened"):
@@ -917,11 +949,11 @@ Return STRICT JSON matching this exact schema:
         try:
             history_lines = ["<Recent_Context>"]
             for entry in recent_entries:
-                dt = datetime.fromisoformat(entry.get('timestamp', datetime.now().isoformat()))
-                time_str = dt.strftime('%H:%M')
-                role = entry.get('role', 'UNKNOWN')
-                message = entry.get('message', '')
-                metadata = entry.get('metadata', {})
+                dt = datetime.fromisoformat(entry.get("timestamp", datetime.now().isoformat()))
+                time_str = dt.strftime("%H:%M")
+                role = entry.get("role", "UNKNOWN")
+                message = entry.get("message", "")
+                metadata = entry.get("metadata", {})
                 if role == "CONVERSATION":
                     block = f"[{time_str}]\n{message}"
                 else:
@@ -974,7 +1006,7 @@ Return STRICT JSON matching this exact schema:
 
             query_terms = []
             if query and isinstance(query, str):
-                query_terms = [t for t in re.findall(r'\w+', query.lower()) if len(t) > 2]
+                query_terms = [t for t in re.findall(r"\w+", query.lower()) if len(t) > 2]
 
             def matches(text):
                 if not query_terms:
@@ -985,10 +1017,10 @@ Return STRICT JSON matching this exact schema:
             recent_blocks = []
             for entry in self.master_history:
                 try:
-                    ts = datetime.fromisoformat(entry.get('timestamp', ''))
+                    ts = datetime.fromisoformat(entry.get("timestamp", ""))
                     date_key = ts.strftime("%Y-%m-%d")
                     if date_key >= raw_cutoff_str:
-                        message = entry.get('message', '')
+                        message = entry.get("message", "")
                         if matches(message):
                             recent_blocks.append(self._format_entry(entry, ts))
                 except Exception:
