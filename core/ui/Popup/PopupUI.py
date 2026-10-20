@@ -9,7 +9,7 @@ os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false;qt.text.font.db=false;defa
 from PyQt5.QtCore import (
     Qt, QTimer, QPropertyAnimation, QPoint, QPointF,
     QParallelAnimationGroup, QEasingCurve, QFileSystemWatcher,
-    QRect, QRectF, QSize, qInstallMessageHandler, QByteArray
+    QRect, QRectF, QSize, qInstallMessageHandler, QByteArray, QUrl
 )
 from PyQt5.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QFrame, QPushButton,
@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import (
     QFont, QColor, QFontDatabase, QPainter, QPainterPath,
     QLinearGradient, QRadialGradient, QPen, QPixmap,
-    QTextCursor, QTextCharFormat
+    QTextCursor, QTextCharFormat, QDesktopServices
 )
 from PyQt5.QtSvg import QSvgRenderer
 
@@ -77,20 +77,25 @@ def _render_svg_icon(svg_text, size_px, color):
         if not renderer.isValid():
             return QPixmap()
 
-        src = QPixmap(size_px, size_px)
+        screen = QApplication.primaryScreen()
+        dpr = max(1.0, float(screen.devicePixelRatio() if screen else 1.0))
+        px = int(round(size_px * dpr))
+
+        src = QPixmap(px, px)
         src.fill(Qt.transparent)
         p = QPainter(src)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        renderer.render(p)
+        renderer.render(p, QRectF(0, 0, px, px))
         p.end()
 
-        tinted = QPixmap(size_px, size_px)
+        tinted = QPixmap(px, px)
         tinted.fill(color)
         p2 = QPainter(tinted)
         p2.setCompositionMode(QPainter.CompositionMode_DestinationIn)
         p2.drawPixmap(0, 0, src)
         p2.end()
+        tinted.setDevicePixelRatio(dpr)
 
         return tinted
     except Exception:
@@ -242,7 +247,7 @@ class PremiumCopyButton(QPushButton):
     def __init__(self, font_family="Segoe UI", parent=None):
         super().__init__(parent)
         self.font_family = font_family
-        self.setFixedSize(72, 26)
+        self.setFixedSize(78, 26)
         self.setCursor(Qt.PointingHandCursor)
         self.hover_alpha = 0.0
         self.target_alpha = 0.0
@@ -262,13 +267,11 @@ class PremiumCopyButton(QPushButton):
 
     def show_copied(self):
         self.copied_state = True
-        self.setFixedSize(82, 26)
         self.update()
         self.reset_timer.start(1600)
 
     def _reset_copied(self):
         self.copied_state = False
-        self.setFixedSize(72, 26)
         self.update()
 
     def enterEvent(self, event):
@@ -329,9 +332,8 @@ class PremiumCopyButton(QPushButton):
         center_y = inner_rect.y() + inner_rect.height() / 2.0
 
         if not icon_pix.isNull():
-            icon_x = int(round(start_x))
-            icon_y = int(round(center_y - self._icon_size / 2.0))
-            painter.drawPixmap(icon_x, icon_y, icon_pix)
+            icon_rect = QRectF(start_x, center_y - self._icon_size / 2.0, self._icon_size, self._icon_size)
+            painter.drawPixmap(icon_rect.toRect(), icon_pix)
 
         painter.setPen(text_col)
         text_rect = QRectF(
@@ -507,9 +509,138 @@ class PremiumSpeakerButton(QPushButton):
         else:
             painter.setOpacity(0.28)
 
-        icon_x = int(round(center.x() - self._icon_size / 2.0))
-        icon_y = int(round(center.y() - self._icon_size / 2.0))
-        painter.drawPixmap(icon_x, icon_y, icon_pix)
+        icon_rect = QRectF(
+            center.x() - self._icon_size / 2.0,
+            center.y() - self._icon_size / 2.0,
+            self._icon_size,
+            self._icon_size,
+        )
+        painter.drawPixmap(icon_rect.toRect(), icon_pix)
+
+
+class ImagePreviewOverlay(QWidget):
+    def __init__(self, parent_island, eng_font="Segoe UI", on_close_callback=None):
+        super().__init__(parent_island)
+        self.eng_font = eng_font
+        self.on_close_callback = on_close_callback
+        self.raw_image = None
+        self.source_url = ""
+        self.open_btn_rect = QRectF()
+        self.close_btn_rect = QRectF()
+        self.setCursor(Qt.PointingHandCursor)
+        self.hide()
+
+    def show_preview(self, raw_image, source_url):
+        self.raw_image = raw_image
+        self.source_url = str(source_url or "")
+        if self.parentWidget() is not None:
+            self.setGeometry(self.parentWidget().rect())
+        self.show()
+        self.raise_()
+        self.update()
+
+    def close_preview(self):
+        if self.isVisible():
+            self.hide()
+            if callable(self.on_close_callback):
+                self.on_close_callback()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = QPointF(event.pos())
+            if self.open_btn_rect.contains(pos) and self.source_url:
+                QDesktopServices.openUrl(QUrl(self.source_url))
+                event.accept()
+                return
+            self.close_preview()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event):
+        if self.raw_image is None or self.raw_image.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        full_rect = QRectF(self.rect())
+        bg_path = QPainterPath()
+        bg_path.addRoundedRect(full_rect, 24.0, 24.0)
+        painter.fillPath(bg_path, QColor(10, 11, 16, 244))
+
+        pad_x = 24.0
+        top_bar_h = 46.0
+        bot_bar_h = 52.0
+        avail_w = max(80.0, full_rect.width() - pad_x * 2.0)
+        avail_h = max(80.0, full_rect.height() - top_bar_h - bot_bar_h)
+
+        screen = QApplication.primaryScreen()
+        dpr = max(1.0, float(screen.devicePixelRatio() if screen else 1.0))
+
+        scaled = self.raw_image.scaled(
+            int(round(avail_w * dpr)),
+            int(round(avail_h * dpr)),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        draw_w = scaled.width() / dpr
+        draw_h = scaled.height() / dpr
+        draw_x = full_rect.left() + (full_rect.width() - draw_w) / 2.0
+        draw_y = top_bar_h + (avail_h - draw_h) / 2.0
+
+        img_rect = QRectF(draw_x, draw_y, draw_w, draw_h)
+        img_path = QPainterPath()
+        img_path.addRoundedRect(img_rect, 12.0, 12.0)
+
+        painter.save()
+        painter.setClipPath(img_path)
+        painter.drawImage(img_rect, scaled)
+        painter.restore()
+
+        painter.setPen(QPen(QColor(255, 255, 255, 48), 1.2))
+        painter.drawRoundedRect(img_rect, 12.0, 12.0)
+
+        res_text = f"{self.raw_image.width()} × {self.raw_image.height()} px"
+        painter.setFont(QFont(self.eng_font, 9, QFont.DemiBold))
+        painter.setPen(QColor(210, 212, 225, 220))
+        painter.drawText(
+            QRectF(24.0, 12.0, 260.0, 26.0),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            res_text,
+        )
+
+        self.close_btn_rect = QRectF(full_rect.width() - 50.0, 11.0, 28.0, 28.0)
+        close_path = QPainterPath()
+        close_path.addRoundedRect(self.close_btn_rect, 14.0, 14.0)
+        painter.fillPath(close_path, QColor(255, 255, 255, 24))
+        painter.setPen(QPen(QColor(255, 255, 255, 45), 1.0))
+        painter.drawPath(close_path)
+
+        cx = self.close_btn_rect.center().x()
+        cy = self.close_btn_rect.center().y()
+        d = 4.2
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 1.6, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
+        painter.drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d))
+
+        btn_w, btn_h = 152.0, 30.0
+        self.open_btn_rect = QRectF(
+            (full_rect.width() - btn_w) / 2.0,
+            full_rect.height() - bot_bar_h + 10.0,
+            btn_w,
+            btn_h,
+        )
+        btn_path = QPainterPath()
+        btn_path.addRoundedRect(self.open_btn_rect, 9.0, 9.0)
+        painter.fillPath(btn_path, QColor(191, 90, 242, 48))
+        painter.setPen(QPen(QColor(196, 138, 249, 140), 1.0))
+        painter.drawPath(btn_path)
+
+        painter.setFont(QFont(self.eng_font, 9, QFont.Bold))
+        painter.setPen(QColor(245, 235, 255, 245))
+        painter.drawText(self.open_btn_rect, Qt.AlignCenter, "Open Original ↗")
 
 
 class TypingPopup(QWidget):
@@ -518,7 +649,8 @@ class TypingPopup(QWidget):
         qInstallMessageHandler(_popup_qt_message_handler)
 
         self.max_width = max_width
-        self.padding_h = 165
+        self.chrome_height = 138
+        self.padding_h = 148
         self.target_height = self.padding_h
         self.current_height = float(self.padding_h)
         self.max_allowed_height = 820
@@ -528,6 +660,8 @@ class TypingPopup(QWidget):
         self.target_rgb = [191.0, 90.0, 242.0]
         self._last_mtime = 0.0
         self._poll_tick_counter = 0
+        self._smooth_scroll_y = 0.0
+        self._last_rendered_html = ""
 
         self.master_timer = QTimer(self)
         self.master_timer.timeout.connect(self.master_tick)
@@ -559,6 +693,8 @@ class TypingPopup(QWidget):
         self.idle_counter = 0
         self.worker = None
         self.is_fading_out = False
+        self.anim_group = None
+        self.out_anim_group = None
         self.custom_pos = None
         self.oldPos = None
         self.auto_scroll_enabled = True
@@ -586,7 +722,7 @@ class TypingPopup(QWidget):
             self.file_watcher.addPath(TTS_STATUS_FILE)
         self.file_watcher.fileChanged.connect(self.on_status_file_changed)
 
-        self.master_timer.start(20)
+        self.master_timer.start(16)
         self.check_status_file()
         self.check_tts_status()
 
@@ -688,6 +824,12 @@ class TypingPopup(QWidget):
         self.container_layout.addWidget(self.text_browser, 1)
         self.outer_layout.addWidget(self.container)
 
+        self.preview_overlay = ImagePreviewOverlay(
+            self.inner_island,
+            eng_font=self.eng_font,
+            on_close_callback=self.update_layout_height,
+        )
+
         self.setWindowOpacity(0.0)
         self.setCursor(Qt.ArrowCursor)
 
@@ -696,7 +838,34 @@ class TypingPopup(QWidget):
         self.x_pos = (screen.width() - self.max_width) // 2
         self.start_y = screen.top() + 36
 
+        self.setFixedWidth(self.max_width)
         self.setGeometry(self.x_pos, self.start_y, self.max_width, int(self.current_height))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "preview_overlay") and self.preview_overlay.isVisible():
+            self.preview_overlay.setGeometry(self.inner_island.rect())
+
+    def open_image_preview(self, raw_image, source_url):
+        if raw_image is None or raw_image.isNull():
+            return
+        self.preview_overlay.show_preview(raw_image, source_url)
+        self.update_layout_height()
+
+    def _read_json_nonblocking(self, file_path, callback, retries=2):
+        if not os.path.exists(file_path):
+            return
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                callback(data)
+        except Exception:
+            if retries > 0:
+                QTimer.singleShot(
+                    6,
+                    lambda p=file_path, cb=callback, r=retries - 1: self._read_json_nonblocking(p, cb, r),
+                )
 
     def copy_response_text(self):
         text_to_copy = self.clean_copy_text.strip() or self.text_browser.toPlainText().strip()
@@ -726,21 +895,9 @@ class TypingPopup(QWidget):
             pass
 
     def check_tts_status(self):
-        if not os.path.exists(TTS_STATUS_FILE):
-            return
+        self._read_json_nonblocking(TTS_STATUS_FILE, self._apply_tts_status_data)
 
-        data = None
-        for _ in range(3):
-            try:
-                with open(TTS_STATUS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                break
-            except Exception:
-                time.sleep(0.004)
-
-        if not data:
-            return
-
+    def _apply_tts_status_data(self, data):
         speaking = bool(data.get("speaking", False))
         text = str(data.get("text", ""))
 
@@ -771,19 +928,10 @@ class TypingPopup(QWidget):
     def _poll_word_sync(self):
         if not self.tts_is_speaking:
             return
-        if not os.path.exists(TTS_WORD_SYNC_FILE):
-            return
+        self._read_json_nonblocking(TTS_WORD_SYNC_FILE, self._apply_word_sync_data, retries=1)
 
-        data = None
-        for _ in range(2):
-            try:
-                with open(TTS_WORD_SYNC_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                break
-            except Exception:
-                time.sleep(0.003)
-
-        if not data:
+    def _apply_word_sync_data(self, data):
+        if not self.tts_is_speaking:
             return
 
         if not data.get("active", False):
@@ -936,34 +1084,42 @@ class TypingPopup(QWidget):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
+            if hasattr(self, "preview_overlay") and self.preview_overlay.isVisible():
+                self.preview_overlay.close_preview()
+                event.accept()
+                return
             self.fade_out()
             event.accept()
             return
         super().keyPressEvent(event)
 
     def start_animations(self):
+        if self.out_anim_group is not None and self.out_anim_group.state() == QParallelAnimationGroup.Running:
+            self.out_anim_group.stop()
+
         self.is_fading_out = False
         if not self.master_timer.isActive():
-            self.master_timer.start(20)
+            self.master_timer.start(16)
 
         target_x = self.custom_pos.x() if self.custom_pos is not None else self.x_pos
         target_y = self.custom_pos.y() if self.custom_pos is not None else self.start_y
 
-        self.setGeometry(target_x, target_y - 30, self.max_width, int(self.current_height))
+        self.resize(self.max_width, int(round(self.current_height)))
+        self.move(target_x, target_y - 26)
         self.show()
         self.raise_()
 
         self.anim_group = QParallelAnimationGroup(self)
 
         fade_in = QPropertyAnimation(self, b"windowOpacity")
-        fade_in.setDuration(280)
+        fade_in.setDuration(260)
         fade_in.setStartValue(self.windowOpacity())
         fade_in.setEndValue(1.0)
         fade_in.setEasingCurve(QEasingCurve.OutCubic)
 
         slide_down = QPropertyAnimation(self, b"pos")
-        slide_down.setDuration(360)
-        slide_down.setStartValue(QPoint(target_x, target_y - 30))
+        slide_down.setDuration(320)
+        slide_down.setStartValue(QPoint(target_x, target_y - 26))
         slide_down.setEndValue(QPoint(target_x, target_y))
         slide_down.setEasingCurve(QEasingCurve.OutQuint)
 
@@ -973,12 +1129,12 @@ class TypingPopup(QWidget):
 
     def on_status_file_changed(self, path):
         if os.path.basename(path) == os.path.basename(TTS_STATUS_FILE):
-            QTimer.singleShot(8, self.check_tts_status)
+            QTimer.singleShot(6, self.check_tts_status)
             if os.path.exists(TTS_STATUS_FILE) and TTS_STATUS_FILE not in self.file_watcher.files():
                 self.file_watcher.addPath(TTS_STATUS_FILE)
             return
 
-        QTimer.singleShot(8, self.check_status_file)
+        QTimer.singleShot(6, self.check_status_file)
         if os.path.exists(TYPING_STATUS_FILE) and TYPING_STATUS_FILE not in self.file_watcher.files():
             self.file_watcher.addPath(TYPING_STATUS_FILE)
 
@@ -991,30 +1147,31 @@ class TypingPopup(QWidget):
         return "", str(raw_text or "")
 
     def check_status_file(self):
-        if not os.path.exists(TYPING_STATUS_FILE):
-            return
+        self._read_json_nonblocking(TYPING_STATUS_FILE, self._apply_status_file_data)
 
-        data = None
-        for _ in range(3):
-            try:
-                with open(TYPING_STATUS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                break
-            except Exception:
-                time.sleep(0.004)
-
-        if not data:
-            return
-
-        new_text = data.get("text", "")
-        new_status = data.get("status", "idle")
+    def _apply_status_file_data(self, data):
+        new_text = str(data.get("text", ""))
+        new_status = str(data.get("status", "idle"))
 
         if new_status in ("typing", "completed"):
             self.idle_counter = 0
             if not self.isVisible() or self.is_fading_out or self.windowOpacity() < 0.1:
                 self.start_animations()
 
-        if new_text != self.current_raw_text:
+        text_changed = new_text != self.current_raw_text
+        status_changed = new_status != self.status
+
+        if status_changed:
+            self.status = new_status
+            self.idle_counter = 0
+            if self.status == "typing":
+                self.status_tag.setText("Jarvis Responding")
+                self.target_rgb = [191.0, 90.0, 242.0]
+            elif self.status == "completed":
+                self.status_tag.setText("Response Ready")
+                self.target_rgb = [48.0, 209.0, 88.0]
+
+        if text_changed:
             self.current_raw_text = new_text
             mood, cleaned = self._extract_emotion_and_clean(new_text)
             self.clean_copy_text = cleaned
@@ -1025,41 +1182,45 @@ class TypingPopup(QWidget):
                 self.mood_pill.clear()
                 self.mood_pill.hide()
             self.render_markdown_async(new_text)
-
-        if new_status != self.status:
-            self.status = new_status
-            self.idle_counter = 0
-            if self.status == "typing":
-                self.status_tag.setText("Jarvis Responding")
-                self.target_rgb = [191.0, 90.0, 242.0]
-            elif self.status == "completed":
-                self.status_tag.setText("Response Ready")
-                self.target_rgb = [48.0, 209.0, 88.0]
+        elif status_changed and self.status == "completed" and self.current_raw_text:
+            self.render_markdown_async(self.current_raw_text)
 
     def render_markdown_async(self, raw_text):
         self.pending_raw_text = raw_text
-        self.parse_debounce_timer.start(35)
+        self.parse_debounce_timer.start(28)
 
     def _execute_parse(self):
         if not self.pending_raw_text:
             return
         if self.worker is not None and self.worker.isRunning():
             self.worker.is_cancelled = True
-            self.parse_debounce_timer.start(20)
+            self.parse_debounce_timer.start(16)
             return
 
-        self.worker = ParserWorker(self.pending_raw_text, self.eng_font, self.hin_font)
+        self.worker = ParserWorker(
+            self.pending_raw_text,
+            self.eng_font,
+            self.hin_font,
+            is_streaming=(self.status == "typing"),
+        )
         self.worker.finished_signal.connect(self.on_markdown_parsed)
         self.worker.start()
 
     def on_markdown_parsed(self, tokens, final_html):
+        if final_html == self._last_rendered_html:
+            self.update_layout_height()
+            return
+        self._last_rendered_html = final_html
+
         scrollbar = self.text_browser.verticalScrollBar()
         prev_val = scrollbar.value()
-        prev_max = scrollbar.maximum()
-        was_at_bottom = (prev_val >= prev_max - 18) or (self.status == "typing" and self.auto_scroll_enabled)
 
         self.text_browser.setUpdatesEnabled(False)
+        doc = self.text_browser.document()
+        doc.setDocumentMargin(4.0)
+        doc.setTextWidth(float(self.max_width - 102))
         self.text_browser.setHtml(final_html)
+
         self._cached_plain_text = None
         self._word_char_spans = None
         self._word_sync_sentence_id = -1
@@ -1067,17 +1228,21 @@ class TypingPopup(QWidget):
         self._clear_word_highlight()
         self.update_layout_height()
 
-        if was_at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
-            self.last_scroll_value = scrollbar.maximum()
+        if self.target_height < self.max_allowed_height:
+            scrollbar.setValue(0)
+            self._smooth_scroll_y = 0.0
+            self.last_scroll_value = 0
         else:
-            scrollbar.setValue(min(prev_val, scrollbar.maximum()))
-            self.last_scroll_value = scrollbar.value()
+            clamped_val = min(prev_val, scrollbar.maximum())
+            scrollbar.setValue(clamped_val)
+            self._smooth_scroll_y = float(clamped_val)
+            self.last_scroll_value = clamped_val
+
         self.text_browser.setUpdatesEnabled(True)
 
     def master_tick(self):
         self._poll_tick_counter += 1
-        if self._poll_tick_counter >= 8:
+        if self._poll_tick_counter >= 9:
             self._poll_tick_counter = 0
             try:
                 if os.path.exists(TYPING_STATUS_FILE):
@@ -1089,7 +1254,7 @@ class TypingPopup(QWidget):
                 pass
 
         self._tts_poll_counter += 1
-        if self._tts_poll_counter >= 10:
+        if self._tts_poll_counter >= 11:
             self._tts_poll_counter = 0
             self.check_tts_status()
 
@@ -1110,33 +1275,43 @@ class TypingPopup(QWidget):
         else:
             self.auto_scroll_enabled = True
 
-        self.outer_layout.activate()
-        min_req_h = self.outer_layout.totalMinimumSize().height()
-        effective_target_h = max(self.target_height, min_req_h)
+        effective_target_h = max(self.padding_h, self.target_height)
+        diff_h = effective_target_h - self.current_height
 
-        if abs(effective_target_h - self.current_height) > 0.8:
-            self.current_height += (effective_target_h - self.current_height) * 0.22
-            new_h = max(min_req_h, int(round(self.current_height)))
+        if abs(diff_h) > 0.6:
+            self.current_height += diff_h * 0.26
+            new_h = int(round(self.current_height))
             if self.height() != new_h:
-                self.setGeometry(self.x(), self.y(), self.max_width, new_h)
+                self.resize(self.max_width, new_h)
         elif int(round(self.current_height)) != effective_target_h:
             self.current_height = float(effective_target_h)
             if self.height() != effective_target_h:
-                self.setGeometry(self.x(), self.y(), self.max_width, int(effective_target_h))
+                self.resize(self.max_width, int(effective_target_h))
 
-        if self.auto_scroll_enabled and self.current_height >= self.max_allowed_height - 12:
+        if effective_target_h < self.max_allowed_height:
+            if cur_v != 0:
+                scrollbar.setValue(0)
+            self._smooth_scroll_y = 0.0
+            self.last_scroll_value = 0
+        elif self.auto_scroll_enabled and self.current_height >= self.max_allowed_height - 10:
             if cur_v < max_v:
-                new_v = cur_v + (max_v - cur_v) * 0.22
-                if (max_v - cur_v) <= 2:
-                    new_v = max_v
-                scrollbar.setValue(int(new_v))
-                self.last_scroll_value = int(new_v)
+                if abs(self._smooth_scroll_y - cur_v) > 4.0:
+                    self._smooth_scroll_y = float(cur_v)
+                step = max(1.0, (max_v - self._smooth_scroll_y) * 0.25)
+                self._smooth_scroll_y = min(float(max_v), self._smooth_scroll_y + step)
+                if max_v - self._smooth_scroll_y < 1.0:
+                    self._smooth_scroll_y = float(max_v)
+                target_scroll_int = int(round(self._smooth_scroll_y))
+                scrollbar.setValue(target_scroll_int)
+                self.last_scroll_value = target_scroll_int
             else:
+                self._smooth_scroll_y = float(cur_v)
                 self.last_scroll_value = cur_v
         else:
+            self._smooth_scroll_y = float(cur_v)
             self.last_scroll_value = cur_v
 
-        self.glow_phase += 0.045
+        self.glow_phase += 0.04
         if self.glow_phase > math.pi * 2:
             self.glow_phase -= math.pi * 2
 
@@ -1148,27 +1323,43 @@ class TypingPopup(QWidget):
         self.container.update_visuals(self.current_rgb, self.glow_phase)
 
         if self.status == "completed" and not self.underMouse():
-            word_count = len(self.clean_copy_text.split())
-            if 0 < word_count < 45:
-                self.idle_counter += 1
-                if self.idle_counter > 320:
-                    self.fade_out()
+            if not (hasattr(self, "preview_overlay") and self.preview_overlay.isVisible()):
+                word_count = len(self.clean_copy_text.split())
+                if 0 < word_count < 45:
+                    self.idle_counter += 1
+                    if self.idle_counter > 360:
+                        self.fade_out()
 
     def update_layout_height(self):
         doc = self.text_browser.document()
-        viewport_w = self.text_browser.viewport().width()
-        if viewport_w <= 20:
-            viewport_w = self.max_width - 102
-        doc.setTextWidth(float(viewport_w))
-        doc_height = int(doc.size().height())
-        new_target = min(doc_height + 118, self.max_allowed_height)
-        if abs(new_target - self.target_height) > 2:
-            self.target_height = max(self.padding_h, new_target)
+        if doc is None:
+            return
+        doc.setDocumentMargin(4.0)
+        exact_text_w = float(self.max_width - 102)
+        if abs(doc.textWidth() - exact_text_w) > 0.5:
+            doc.setTextWidth(exact_text_w)
+
+        doc_height = int(math.ceil(doc.size().height()))
+        desired_h = doc_height + self.chrome_height
+
+        if hasattr(self, "preview_overlay") and self.preview_overlay.isVisible():
+            desired_h = max(desired_h, min(540, self.max_allowed_height))
+
+        new_target = max(self.padding_h, min(desired_h, self.max_allowed_height))
+        if abs(new_target - self.target_height) >= 1:
+            self.target_height = new_target
+
+    def _on_fade_out_finished(self):
+        if self.is_fading_out:
+            QApplication.quit()
 
     def fade_out(self):
         if not self.isVisible() or self.is_fading_out:
             return
         self.is_fading_out = True
+
+        if self.anim_group is not None and self.anim_group.state() == QParallelAnimationGroup.Running:
+            self.anim_group.stop()
 
         if self.tts_is_speaking or self.speak_btn.speaking:
             self._write_tts_command("stop")
@@ -1182,20 +1373,20 @@ class TypingPopup(QWidget):
         self.out_anim_group = QParallelAnimationGroup(self)
 
         fade_out = QPropertyAnimation(self, b"windowOpacity")
-        fade_out.setDuration(260)
+        fade_out.setDuration(250)
         fade_out.setStartValue(self.windowOpacity())
         fade_out.setEndValue(0.0)
         fade_out.setEasingCurve(QEasingCurve.InOutQuad)
 
         slide_up = QPropertyAnimation(self, b"pos")
-        slide_up.setDuration(300)
+        slide_up.setDuration(280)
         slide_up.setStartValue(self.pos())
         slide_up.setEndValue(QPoint(self.x(), self.y() - 24))
         slide_up.setEasingCurve(QEasingCurve.InCubic)
 
         self.out_anim_group.addAnimation(fade_out)
         self.out_anim_group.addAnimation(slide_up)
-        self.out_anim_group.finished.connect(lambda: QApplication.quit())
+        self.out_anim_group.finished.connect(self._on_fade_out_finished)
         self.out_anim_group.start()
 
     def mousePressEvent(self, event):
