@@ -133,6 +133,27 @@ def _build_fast_brain_tools() -> list:
                     "required": ["query"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "escalate_to_agentic",
+                "description": "Use this tool when the user's task is outside Fast Brain's scope (code writing, file operations, terminal commands, emails, WhatsApp, Telegram, memory recall, calendar, image generation/analysis, mobile device control, deep research, or any complex multi-step workflow). This hands off the FULL command to the Agentic Brain which will execute it end-to-end. When calling this tool, your main text response MUST be empty and you must NOT call any other tool in the same response.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_reply": {
+                            "type": "string",
+                            "description": "A brief one-line acknowledgment shown to the user before handoff (e.g., 'Bhai, ye task thoda deep hai, main apne Agentic Brain ko de raha hoon...')."
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Internal one-line reason for escalation (used for logging only, not shown to user)."
+                        }
+                    },
+                    "required": ["agent_reply"]
+                }
+            }
         }
     ]
 
@@ -257,6 +278,50 @@ def _handle_quick_web_search(tool_args_str: str, raw_command: str) -> str:
     return final_answer.strip()
 
 
+def _handle_escalate_to_agentic(tool_args_str: str, raw_command: str, memory_instance=None) -> Dict[str, any]:
+    try:
+        args = json.loads(tool_args_str)
+    except Exception as e:
+        logger.error(f"❌ Failed to parse escalate_to_agentic arguments: {e}\n{traceback.format_exc()}")
+        args = {}
+
+    agent_reply = (args.get("agent_reply") or "").strip()
+    reason = (args.get("reason") or "").strip()
+
+    if not agent_reply:
+        agent_reply = "Bhai, ye task thoda complex hai, main apne Agentic Brain ko handoff kar raha hoon..."
+
+    logger.info(f"🔀 Escalation triggered | reason: {reason or 'unspecified'} | command: '{raw_command[:80]}'")
+
+    update_typing_status("typing", agent_reply)
+    time.sleep(0.4)
+
+    try:
+        from core.brain.Processor.AgenticBrain import run_agentic_loop
+        agentic_result = run_agentic_loop(
+            raw_command=raw_command,
+            context="",
+            memory_instance=memory_instance,
+            silent=False,
+        )
+        if isinstance(agentic_result, dict):
+            logger.info(f"✅ Escalation complete | agentic_response_chars={len(str(agentic_result.get('response', '')))}")
+            return agentic_result
+        logger.warning("⚠️ Agentic returned non-dict result during escalation. Falling back to error message.")
+        err_msg = "Bhai, Agentic Brain se response nahi mila. Please retry karo."
+        update_typing_status("completed", err_msg)
+        send_telegram_update(final_response=err_msg)
+        clear_telegram_context()
+        return make_result(err_msg, priority="high")
+    except Exception as e:
+        logger.error(f"❌ Escalation to Agentic failed: {e}\n{traceback.format_exc()}")
+        err_msg = "Bhai, Agentic Brain se connect nahi ho paya. Please retry karo."
+        update_typing_status("completed", err_msg)
+        send_telegram_update(final_response=err_msg)
+        clear_telegram_context()
+        return make_result(err_msg, priority="high")
+
+
 def fetch_from_groq(raw_command: str, memory_instance=None, ephemeral: dict = None) -> Optional[Dict[str, any]]:
     if not fast_client:
         logger.error("❌ Fast Brain client not initialized. Check FAST_BRAIN_API_KEY.")
@@ -299,6 +364,20 @@ def fetch_from_groq(raw_command: str, memory_instance=None, ephemeral: dict = No
         logger.info(
             f"📥 Fast Brain stream complete | text_chars={len(final_text)} | tool_calls={len(tool_calls_map)}"
         )
+
+        escalation_call = None
+        for idx in sorted(tool_calls_map.keys()):
+            tc = tool_calls_map[idx]
+            if tc.get("name", "").strip() == "escalate_to_agentic":
+                escalation_call = tc
+                break
+
+        if escalation_call is not None:
+            logger.info("🔀 Escalation tool detected — bypassing normal Fast Brain flow and handing off to Agentic Brain.")
+            escalate_args_str = (escalation_call.get("arguments") or "").strip()
+            if not escalate_args_str:
+                escalate_args_str = "{}"
+            return _handle_escalate_to_agentic(escalate_args_str, raw_command, memory_instance)
 
         response_parts = []
 
