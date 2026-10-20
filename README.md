@@ -593,7 +593,7 @@ Jarvis implements a **four-tier** zero-duplication memory architecture:
    - **10-Minute TTL Artifacts:** Stores transient unspoken system artifacts (`last_screenshot`, `last_generated_image`) with automatic 600s TTL pruning.
    - **`mtime`-Cached Hardware State:** Tracks live connected Android phones (`connected_devices.json`) using file modification timestamps for zero-overhead per-step reads.
    - **90-Second Proactive HITL State Machine:** Manages `waiting_for_confirmation`, `pending_task_data`, and atomic `force_silent_agentic` flags via background timers so affirmative user replies seamlessly inject the original proactive event payload into AgenticBrain.
-5. - 🧬 **Semantic Behavioral Pattern Engine (Contextual Personalization):**
+5. **🧬 Semantic Behavioral Pattern Engine (Contextual Personalization):**
    - **Dual Extraction, Single LLM Cost:** Every user message triggers two parallel async extractors in `Memory.add_message()` — an **LTM extractor** (identity, relations, contacts, assets, static preferences → knowledge graph) and a **Behavioral extractor** (routines, contextual habits, workflow preferences → JSONL store). Both use the same `LTM_EXTRACTION_MODEL` / API key / endpoint. Zero extra cost, zero extra latency.
    - **Verbatim Ground Truth:** Extracted patterns store the user's **exact words** as `raw_statement` (never paraphrased), plus a one-line `meaning`, `trigger_contexts` (for cross-domain RAG triggering), `confidence` (0.5–0.95), `evidence_count`, `type`, `first_mentioned`, and `last_mentioned` fields in `Data/jarvis_memory/behavioral_patterns.jsonl`.
    - **Local Cosine Retrieval:** Each pattern is embedded once with the already-loaded `BAAI/bge-small-en-v1.5` model. On every new command, the command + last 2 user turns are embedded together and compared against all patterns via cosine similarity. Top-K above strict thresholds are auto-injected into the ephemeral prompt.
@@ -921,9 +921,9 @@ This project is distributed under the **GNU General Public License v3.0**. See [
 
 ## 👤 About the Author
 
-Built by **Kaif Ansari** ([@thekaifansari01](https://github.com/thekaifansari01)) — an 18-year-old solo developer from a commerce background, currently in the first year of BCA. No team. No funding. No high-end hardware — Jarvis was built and tested on an Intel i5-3210M with 4 GB RAM. Just late nights, coffee, and a stubborn belief that one person can build something that matters.
+Built and maintained by **Kaif Ansari** ([@thekaifansari01](https://github.com/thekaifansari01)) — a self-taught developer with a commerce background, currently pursuing a BCA. Jarvis began as a solo project on an Intel i5-3210M with 4 GB RAM, and that constraint shaped everything: cloud LLMs by default, lightweight local embeddings, and a zero-bloat architecture.
 
-**Connect:** &nbsp; [🐦 Twitter / X](https://twitter.com/thekaifansari01) &nbsp;·&nbsp; [💻 GitHub](https://github.com/thekaifansari01) &nbsp;·&nbsp; [📸 Instagram](https://instagram.com/thekaifansari01) &nbsp;·&nbsp; [💼 LinkedIn](https://linkedin.com/in/thekaifansari01) &nbsp;·&nbsp;[🟣 Reddit](https://reddit.com/user/thekaifansari01) &nbsp;·&nbsp; [🎮 Discord](https://discord.com/users/thekaifansari01) &nbsp;·&nbsp; [📧 Email](mailto:thekaifansari01@gmail.com)
+**Connect:** &nbsp; [🐦 Twitter / X](https://twitter.com/thekaifansari01) &nbsp;·&nbsp; [💻 GitHub](https://github.com/thekaifansari01) &nbsp;·&nbsp; [📸 Instagram](https://instagram.com/thekaifansari01) &nbsp;·&nbsp; [💼 LinkedIn](https://linkedin.com/in/thekaifansari01) &nbsp;·&nbsp; [🟣 Reddit](https://reddit.com/user/thekaifansari01) &nbsp;·&nbsp; [🎮 Discord](https://discord.com/users/thekaifansari01) &nbsp;·&nbsp; [📧 Email](mailto:thekaifansari01@gmail.com)
 
 ---
 
@@ -933,7 +933,7 @@ If the **Jarvis OS Agent** streamlined your workflow, autonomously fixed your bu
 
 - ⭐ **Star** this repository to help it rank and grow the community.
 - 🐦 **Follow and share** your use cases by tagging [@thekaifansari01](https://twitter.com/thekaifansari01).
-- ☕ **Buy me a coffee** (link coming soon) — late nights, compiling code, and building AI operating systems run purely on caffeine.
+- ☕ **Buy me a coffee** (link coming soon) — building AI operating systems runs on caffeine.
 
 Every star, fork, and share helps more developers discover the project.
 
