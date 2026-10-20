@@ -74,7 +74,7 @@ class GenericSemanticRouter:
             "- Long-term memory retrieval: searching notes, facts, or calendar.\n"
             "- Advanced research: scraping, arxiv search, or deep research.\n"
             "- Compound multi-step workflows.\n"
-            "- Image/Screen analysis.\n"
+            "- Image generation, image editing, logo/wallpaper/poster creation, or Image/Screen analysis.\n"
             "- ANY command modifying or analyzing a local file/system state.\n\n"
             "### FEW-SHOT EXAMPLES\n"
             "User: 'Hello Jarvis' -> {\"route\": \"FAST\", \"english_query\": \"greeting hello\", \"domain\": \"general_none\"}\n"
@@ -206,7 +206,8 @@ def get_local_fallback_route(command: str) -> str:
     ]
 
     agentic_strict_patterns = [
-        r'\b(write|run|execute|create|make|banao|likho|chalao).{0,30}(python|script|code|file|folder|dir|react|app|server)\b',
+        r'\b(write|run|execute|create|make|generate|edit|banao|likho|chalao).{0,30}(python|script|code|file|folder|dir|react|app|server|image|photo|picture|pic|wallpaper|logo|poster|art|illustration)\b',
+        r'\b(image|photo|picture|pic|wallpaper|logo|poster|art|illustration).{0,30}(generate|create|make|edit|banao|bana do|bnado)\b',
         r'\b(send|write|bhejo|read|check|karo).{0,30}(email|mail|gmail|whatsapp|msg|message|telegram)\b',
         r'\b(analyze|analyse|read|describe|explain|dekho|dikhao).{0,30}(image|photo|picture|screenshot|screen)\b',
         r'\b(search|find|check|yaad|recall|batao|kahan).{0,30}(memory|history|vault|notes|kal|aaj)\b',

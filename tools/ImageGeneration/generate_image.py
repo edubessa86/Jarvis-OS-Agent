@@ -15,6 +15,9 @@ from core.brain.config import (
     IMAGE_GEN_MODEL,
     IMAGE_GEN_ENDPOINT,
     AI_HORDE_IMAGE_MODEL,
+    FAST_BRAIN_API_KEY,
+    FAST_BRAIN_MODEL,
+    FAST_BRAIN_ENDPOINT,
 )
 
 load_dotenv()
@@ -22,10 +25,68 @@ load_dotenv()
 CREATIONS_DIR = Path.home() / "Documents" / "Jarvis" / "GeneratedImages"
 CREATIONS_DIR.mkdir(parents=True, exist_ok=True)
 
+PROMPT_ENHANCER_SYSTEM = (
+    "You are an elite AI Visual Art Director and Master Prompt Engineer. "
+    "Transform the user's raw or Hinglish image request into a vivid, hyper-detailed, "
+    "cinematic English image generation prompt (60 to 100 words).\n"
+    "Rules:\n"
+    "1. Automatically infer the best visual style (photorealistic photography, cinematic film still, "
+    "cyberpunk/sci-fi, 3D Octane/Unreal Engine 5 render, anime/digital illustration, or clean vector logo/UI).\n"
+    "2. Enrich with micro-details: subject textures, facial expressions or materials, environment depth, "
+    "atmosphere, volumetric/cinematic lighting, color grading, and camera composition (e.g., 35mm or 85mm f/1.4 lens, "
+    "shallow depth of field, ultra-sharp focus, 8k resolution).\n"
+    "3. Translate any Hindi/Hinglish terms into rich visual English while preserving cultural/Indian aesthetics if implied.\n"
+    "4. Strictly preserve any exact text in quotes, names, or specific colors requested by the user.\n"
+    "5. Output ONLY the final enhanced prompt text. Do NOT include explanations, prefixes, labels, or surrounding quotes."
+)
+
 
 def image_to_base64(image_path: str) -> str:
     with open(image_path, "rb") as img_file:
         return base64.b64encode(img_file.read()).decode("utf-8")
+
+
+def enhance_image_prompt(raw_prompt: str) -> str:
+    clean_prompt = (raw_prompt or "").strip()
+    if not clean_prompt:
+        return clean_prompt
+
+    if not FAST_BRAIN_API_KEY or not FAST_BRAIN_ENDPOINT or not FAST_BRAIN_MODEL:
+        return clean_prompt
+
+    headers = {
+        "Authorization": f"Bearer {FAST_BRAIN_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": FAST_BRAIN_MODEL,
+        "messages": [
+            {"role": "system", "content": PROMPT_ENHANCER_SYSTEM},
+            {"role": "user", "content": f"Raw image request: {clean_prompt}"},
+        ],
+        "temperature": 0.6,
+        "max_tokens": 220,
+    }
+
+    try:
+        endpoint = f"{FAST_BRAIN_ENDPOINT.rstrip('/')}/chat/completions"
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            choices = data.get("choices") or []
+            if choices:
+                enhanced = (choices[0].get("message", {}).get("content") or "").strip()
+                enhanced = enhanced.strip("\"'")
+                if len(enhanced) > 20:
+                    logger.info("Enhanced image prompt: %s", enhanced)
+                    return enhanced
+        else:
+            logger.warning("Prompt enhancer non-200 status (%s). Using raw prompt.", response.status_code)
+    except Exception as e:
+        logger.warning("Prompt enhancer fallback to raw prompt: %s", e)
+
+    return clean_prompt
 
 
 def generate_image_openai(prompt: str, filename: str) -> str | None:
@@ -48,7 +109,7 @@ def generate_image_openai(prompt: str, filename: str) -> str | None:
 
     try:
         response = requests.post(
-            f"{IMAGE_GEN_ENDPOINT}/images/generations",
+            f"{IMAGE_GEN_ENDPOINT.rstrip('/')}/images/generations",
             headers=headers,
             json=payload,
             timeout=120,
@@ -66,7 +127,7 @@ def generate_image_openai(prompt: str, filename: str) -> str | None:
                     if not image_url:
                         logger.error("No image data or URL in response.")
                         return None
-                    img_response = requests.get(image_url)
+                    img_response = requests.get(image_url, timeout=60)
                     img = Image.open(BytesIO(img_response.content))
 
                 safe_filename = f"{filename}.png" if not filename.endswith(".png") else filename
@@ -90,14 +151,20 @@ def generate_image_horde(prompt: str, filename: str) -> str | None:
 
     logger.info("Using AI Horde for generation: %s", prompt)
 
+    negative_prompt = (
+        "blurry, low quality, lowres, distorted, grainy, deformed anatomy, disfigured, "
+        "bad hands, extra fingers, missing limbs, mutated, poorly drawn face, watermark, "
+        "text, signature, oversaturated, plastic skin, ugly, out of focus"
+    )
+
     payload = {
-        "prompt": f"{prompt} ### blurry, low quality, distorted, grainy",
+        "prompt": f"{prompt} ### {negative_prompt}",
         "models": [AI_HORDE_IMAGE_MODEL],
         "params": {
-            "steps": 25,
+            "steps": 30,
             "width": 1024,
             "height": 1024,
-            "cfg_scale": 7,
+            "cfg_scale": 7.5,
         },
     }
 
@@ -222,10 +289,11 @@ def handle_image_command(action_type: str, prompt: str, filename: str = None, ta
         filename = f"image_{int(time.time())}"
 
     if action_type == "generate":
-        result = generate_image_openai(prompt, filename)
+        enhanced_prompt = enhance_image_prompt(prompt)
+        result = generate_image_openai(enhanced_prompt, filename)
         if not result:
             logger.warning("Primary image generation failed. Falling back to AI Horde.")
-            result = generate_image_horde(prompt, filename)
+            result = generate_image_horde(enhanced_prompt, filename)
         return result
 
     if action_type == "edit":

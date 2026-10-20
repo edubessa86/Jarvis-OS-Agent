@@ -714,13 +714,23 @@ def get_native_tools():
                     name="image_command",
                     description=(
                         "[WHEN TO USE]: Use to generate a new AI image from a text prompt ('generate') "
-                        "or edit an existing local image file ('edit')."
+                        "or edit an existing local image file ('edit').\n"
+                        "[PROMPT RULE FOR 'generate']: Never send a bare 2-3 word prompt. "
+                        "Pass a descriptive English visual prompt capturing the user's complete intent, subject details, "
+                        "art style (photorealistic, cinematic, cyberpunk, 3D render, anime, logo, etc.), lighting, atmosphere, "
+                        "and any specific text or colors mentioned by the user."
                     ),
                     parameters=types.Schema(
                         type=types.Type.OBJECT,
                         properties={
                             "action": types.Schema(type=types.Type.STRING, description="Must be exactly 'generate' or 'edit'."),
-                            "prompt": types.Schema(type=types.Type.STRING, description="Detailed visual description of the image to generate/edit."),
+                            "prompt": types.Schema(
+                                type=types.Type.STRING,
+                                description=(
+                                    "For 'generate': Rich visual description including subject, style, lighting, mood, and composition. "
+                                    "For 'edit': Detailed description of the visual modifications to apply."
+                                )
+                            ),
                             "filename": types.Schema(type=types.Type.STRING, description="Desired output filename or save path."),
                             "target_file": types.Schema(type=types.Type.STRING, description="For 'edit' action: Absolute path of the original image.")
                         },
