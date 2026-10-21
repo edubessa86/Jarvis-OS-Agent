@@ -30,7 +30,7 @@ def start_agent_panel():
     stop_agent_panel()
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        panel_script = os.path.join(base_dir, "core", "ui", "agent_panel.py")
+        panel_script = os.path.join(base_dir, "core", "ui", "AgentPanel", "AgentPanel.py")
         if os.path.exists(panel_script):
             creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
             _panel_process = proc_manager.spawn(
