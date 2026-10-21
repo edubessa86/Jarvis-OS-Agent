@@ -30,16 +30,19 @@ def start_agent_panel():
     stop_agent_panel()
     try:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        panel_script = os.path.join(base_dir, "core", "ui", "AgentPanel", "AgentPanel.py")
-        if os.path.exists(panel_script):
-            creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
-            _panel_process = proc_manager.spawn(
-                [sys.executable, panel_script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creation_flags
-            )
-            logging.info("Agent panel started successfully.")
+        panel_module_file = os.path.join(base_dir, "core", "ui", "AgentPanel", "AgentPanel.py")
+        if not os.path.exists(panel_module_file):
+            logging.warning(f"AgentPanel.py not found at {panel_module_file} — skipping start.")
+            return
+        creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+        _panel_process = proc_manager.spawn(
+            [sys.executable, "-m", "core.ui.AgentPanel.AgentPanel"],
+            cwd=base_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags
+        )
+        logging.info("Agent panel started successfully (module mode).")
     except Exception as e:
         logging.error(f"Agent panel start failed: {e}")
 

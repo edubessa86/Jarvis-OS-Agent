@@ -3,6 +3,13 @@ import os
 import re
 import math
 
+if __name__ == "__main__" and __package__ in (None, ""):
+    _bootstrap_here = os.path.dirname(os.path.abspath(__file__))
+    _bootstrap_root = os.path.dirname(os.path.dirname(os.path.dirname(_bootstrap_here)))
+    if _bootstrap_root not in sys.path:
+        sys.path.insert(0, _bootstrap_root)
+    __package__ = "core.ui.AgentPanel"
+
 from .styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
 
 from PyQt5.QtCore import (
