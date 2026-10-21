@@ -32,6 +32,7 @@ Data/model/vosk-model-small/
 # Dependency installs and compiled application binaries
 node_modules/
 Bin/
+.pytest_cache/
 
 # Qt Creator / qmake build artifacts
 core/UiSrc/**/debug/
