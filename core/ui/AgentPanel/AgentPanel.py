@@ -3,7 +3,7 @@ import os
 import re
 import math
 
-from styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
+from .styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
 
 from PyQt5.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
@@ -18,11 +18,11 @@ from PyQt5.QtGui import (
     QFont, QFontDatabase, QFontMetrics, QCursor
 )
 
-from ThoughtViewer import ThoughtViewer
-from ZmqListener import AgentZmqListener
-from StatusOrb import StatusOrb
-from IslandContainer import IslandContainer
-from ObservationCard import ObservationCard
+from .ThoughtViewer import ThoughtViewer
+from .ZmqListener import AgentZmqListener
+from .StatusOrb import StatusOrb
+from .IslandContainer import IslandContainer
+from .ObservationCard import ObservationCard
 
 
 class AgentPanel(QWidget):

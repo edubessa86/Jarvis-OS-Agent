@@ -6,8 +6,8 @@ from PyQt5.QtGui import (
     QColor, QPainter, QPen, QTextFormat, QTextCursor, QBrush
 )
 
-from styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
-from MarkdownRenderer import MarkdownRenderer
+from .styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
+from .MarkdownRenderer import MarkdownRenderer
 
 
 class ThoughtViewer(QTextBrowser):
