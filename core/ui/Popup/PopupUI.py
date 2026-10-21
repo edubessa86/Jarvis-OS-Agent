@@ -795,7 +795,7 @@ class TypingPopup(QWidget):
         self.copy_btn.clicked.connect(self.copy_response_text)
 
         self.close_btn = PremiumCloseButton(self)
-        self.close_btn.clicked.connect(self.fade_out)
+        self.close_btn.clicked.connect(lambda: self.fade_out(stop_tts=True))
 
         self.header_layout.addWidget(self.status_orb)
         self.header_layout.addWidget(self.status_tag)
@@ -1088,7 +1088,7 @@ class TypingPopup(QWidget):
                 self.preview_overlay.close_preview()
                 event.accept()
                 return
-            self.fade_out()
+            self.fade_out(stop_tts=True)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -1322,13 +1322,20 @@ class TypingPopup(QWidget):
         self.speak_btn.set_accent(self.current_rgb, self.glow_phase)
         self.container.update_visuals(self.current_rgb, self.glow_phase)
 
-        if self.status == "completed" and not self.underMouse():
+        if (
+            self.status == "completed"
+            and not self.underMouse()
+            and not self.tts_is_speaking
+            and not self.speak_btn.speaking
+        ):
             if not (hasattr(self, "preview_overlay") and self.preview_overlay.isVisible()):
                 word_count = len(self.clean_copy_text.split())
                 if 0 < word_count < 45:
                     self.idle_counter += 1
                     if self.idle_counter > 360:
-                        self.fade_out()
+                        self.fade_out(stop_tts=False)
+        else:
+            self.idle_counter = 0
 
     def update_layout_height(self):
         doc = self.text_browser.document()
@@ -1353,7 +1360,7 @@ class TypingPopup(QWidget):
         if self.is_fading_out:
             QApplication.quit()
 
-    def fade_out(self):
+    def fade_out(self, stop_tts=False):
         if not self.isVisible() or self.is_fading_out:
             return
         self.is_fading_out = True
@@ -1361,7 +1368,7 @@ class TypingPopup(QWidget):
         if self.anim_group is not None and self.anim_group.state() == QParallelAnimationGroup.Running:
             self.anim_group.stop()
 
-        if self.tts_is_speaking or self.speak_btn.speaking:
+        if stop_tts and (self.tts_is_speaking or self.speak_btn.speaking):
             self._write_tts_command("stop")
 
         self._word_highlight_timer.stop()

@@ -20,12 +20,25 @@ load_dotenv()
 from core.logger.logger import logger
 
 _audio_output_available = False
-try:
-    pygame.mixer.init(frequency=24000, buffer=2048)
-    _audio_output_available = True
+
+
+def _ensure_mixer_ready() -> bool:
+    global _audio_output_available
+    try:
+        if pygame.mixer.get_init() is not None:
+            _audio_output_available = True
+            return True
+        pygame.mixer.init(frequency=24000, buffer=2048)
+        _audio_output_available = True
+        return True
+    except Exception as e:
+        _audio_output_available = False
+        logger.error(f"Audio init failed: {e}. Running in text-only mode.")
+        return False
+
+
+if _ensure_mixer_ready():
     logger.info("Audio output enabled")
-except Exception as e:
-    logger.error(f"Audio init failed: {e}. Running in text-only mode.")
 
 TTS_API_KEY = os.getenv("TTS_API_KEY")
 TTS_ENDPOINT = os.getenv("TTS_ENDPOINT")
@@ -46,27 +59,26 @@ _stop_playback = False
 is_speaking = False
 _tts_limit_reached = False
 _sarvam_cooldown_until = 0.0
+_sarvam_consecutive_failures = 0
 _speech_gen_id = 0
 _audio_queue = queue.Queue()
 _start_time = 0.0
 _last_spoken_text = ""
 _tts_command_watcher_running = False
 _last_sentence_id = 0
+
 TTS_STATUS_FILE = "Data/tts_status.json"
 TTS_COMMAND_FILE = "Data/tts_command.json"
 TTS_WORD_SYNC_FILE = "Data/tts_word_sync.json"
+TTS_QUOTA_STATE_FILE = "Data/tts_quota_state.json"
 
 _SARVAM_COOLDOWN_SECONDS = 900.0
+_SARVAM_TRANSIENT_COOLDOWN_SECONDS = 120.0
+_EDGE_STREAM_TIMEOUT = 7.5
 _MAX_CACHE_ITEMS = 32
 _MAX_CACHE_TEXT_LEN = 75
 _audio_cache = OrderedDict()
 _edge_timings_cache = OrderedDict()
-
-_http_session = requests.Session()
-_http_adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=0)
-_http_session.mount("https://", _http_adapter)
-_http_session.mount("http://", _http_adapter)
-_http_session.headers.update({"Connection": "keep-alive", "Content-Type": "application/json"})
 
 EMOJI_PATTERN = re.compile(
     "["
@@ -107,6 +119,80 @@ TECH_PRONUNCIATION_RULES = [
     (re.compile(r'\b(\d+(?:\.\d+)?)\s*KB\b', re.IGNORECASE), r'\1 K B'),
 ]
 
+SPEAKABLE_CHAR_RE = re.compile(r'[A-Za-z0-9\u0900-\u097F]')
+
+
+def _has_speakable_content(text: str) -> bool:
+    if not text:
+        return False
+    return bool(SPEAKABLE_CHAR_RE.search(text))
+
+
+def _load_quota_state():
+    global _tts_limit_reached, _sarvam_cooldown_until
+    try:
+        if os.path.exists(TTS_QUOTA_STATE_FILE):
+            with open(TTS_QUOTA_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cooldown_until = float(data.get("cooldown_until", 0.0) or 0.0)
+            if cooldown_until > time.time():
+                with _state_lock:
+                    _sarvam_cooldown_until = cooldown_until
+                    _tts_limit_reached = True
+    except Exception:
+        pass
+
+
+def _save_quota_state(cooldown_until: float):
+    try:
+        os.makedirs("Data", exist_ok=True)
+        tmp_path = TTS_QUOTA_STATE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({"cooldown_until": float(cooldown_until), "ts": time.time()}, f)
+        os.replace(tmp_path, TTS_QUOTA_STATE_FILE)
+    except Exception:
+        pass
+
+
+def _set_sarvam_cooldown(duration_seconds: float):
+    global _tts_limit_reached, _sarvam_cooldown_until
+    with _state_lock:
+        until = time.time() + float(duration_seconds)
+        if until > _sarvam_cooldown_until:
+            _sarvam_cooldown_until = until
+        _tts_limit_reached = True
+        saved_until = _sarvam_cooldown_until
+    if duration_seconds >= _SARVAM_COOLDOWN_SECONDS:
+        _save_quota_state(saved_until)
+
+
+def _is_sarvam_available() -> bool:
+    global _tts_limit_reached, _sarvam_cooldown_until
+    if not TTS_API_KEY or not TTS_ENDPOINT:
+        return False
+    with _state_lock:
+        if _tts_limit_reached:
+            if time.time() >= _sarvam_cooldown_until:
+                _tts_limit_reached = False
+                _sarvam_cooldown_until = 0.0
+                return True
+            return False
+        return True
+
+
+def _is_canceled(gen_id: int) -> bool:
+    with _state_lock:
+        return bool(_stop_playback or gen_id != _speech_gen_id)
+
+
+def _create_http_session() -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=2, pool_maxsize=4, max_retries=0)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"Connection": "keep-alive", "Content-Type": "application/json"})
+    return session
+
 
 def _get_cached_audio(engine_name: str, text_chunk: str):
     if len(text_chunk) > _MAX_CACHE_TEXT_LEN:
@@ -128,6 +214,25 @@ def _put_cached_audio(engine_name: str, text_chunk: str, audio_bytes: bytes):
         _audio_cache.move_to_end(key)
         while len(_audio_cache) > _MAX_CACHE_ITEMS:
             _audio_cache.popitem(last=False)
+
+
+def _get_cached_edge_timings(cache_key: str):
+    with _cache_lock:
+        if cache_key in _edge_timings_cache:
+            _edge_timings_cache.move_to_end(cache_key)
+            return _edge_timings_cache[cache_key]
+    return None
+
+
+def _put_cached_edge_timings(cache_key: str, word_timings: list):
+    if not word_timings:
+        return
+    with _cache_lock:
+        _edge_timings_cache[cache_key] = word_timings
+        _edge_timings_cache.move_to_end(cache_key)
+        while len(_edge_timings_cache) > _MAX_CACHE_ITEMS:
+            _edge_timings_cache.popitem(last=False)
+
 
 def _compute_weighted_word_timings(sentence: str, duration: float) -> list:
     if not sentence or duration <= 0:
@@ -199,12 +304,15 @@ def _write_tts_state():
 
 
 def respeak_last():
-    if _last_spoken_text and _last_spoken_text.strip():
-        threading.Thread(target=speak, args=(_last_spoken_text,), daemon=True).start()
+    with _state_lock:
+        last_text = _last_spoken_text
+    if last_text and last_text.strip():
+        threading.Thread(target=speak, args=(last_text,), daemon=True).start()
 
 
 def is_currently_speaking():
-    return bool(is_speaking)
+    with _state_lock:
+        return bool(is_speaking)
 
 
 def _tts_command_watcher_loop():
@@ -240,15 +348,31 @@ def _tts_command_watcher_loop():
                     except Exception:
                         pass
 
-                    if data:
+                    if isinstance(data, dict):
                         action = str(data.get("action", "")).strip()
+                        cmd_ts = float(data.get("ts", 0.0) or 0.0)
                         if action == "stop":
-                            stop_speaking()
+                            with _state_lock:
+                                current_start = _start_time
+                            if cmd_ts <= 0.0 or current_start <= 0.0 or cmd_ts >= (current_start - 0.05):
+                                stop_speaking()
                         elif action == "respeak":
                             respeak_last()
         except Exception:
             pass
-        time.sleep(0.12)
+        time.sleep(0.10)
+
+
+def _strip_bracketed_text(text: str) -> str:
+    if not text:
+        return ""
+    prev = None
+    while prev != text and "[" in text and "]" in text:
+        prev = text
+        text = re.sub(r'\[[^\][\r\n]*\]', ' ', text)
+    text = re.sub(r'\[.*?\]', ' ', text, flags=re.DOTALL)
+    text = re.sub(r'[\[\]]', ' ', text)
+    return text
 
 
 def clean_text_for_speech(text: str) -> str:
@@ -257,8 +381,9 @@ def clean_text_for_speech(text: str) -> str:
     try:
         text = re.sub(r'```.*?```', ' code ', text, flags=re.DOTALL)
         text = re.sub(r'`([^`]*)`', r'\1', text)
-        text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
-        text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)
+        text = re.sub(r'!\[.*?\]\(.*?\)', ' ', text)
+        text = re.sub(r'\[([^\]]*)\]\((?:https?\vert{}file\vert{}imgpreview\vert{}preview)://[^)]*\)', r'\1', text, flags=re.IGNORECASE)
+        text = _strip_bracketed_text(text)
         text = re.sub(r'http[s]?://\S+', ' link ', text)
 
         for pattern, replacement in TECH_PRONUNCIATION_RULES:
@@ -277,9 +402,8 @@ def clean_text_for_speech(text: str) -> str:
         text = re.sub(r'[!?]{2,}', lambda m: m.group()[0], text)
         text = re.sub(r'[,;:]{2,}', ',', text)
         text = re.sub(r'\(\s*\)', '', text)
-        text = re.sub(r'\[\s*\]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        return text
+        return text if _has_speakable_content(text) else ""
     except Exception as e:
         logger.error(f"Text cleaning error: {e}")
         return text.strip()
@@ -295,43 +419,57 @@ def _split_by_word_boundary(text: str, max_len: int = 180) -> list:
         if len(current) + 1 + len(w) <= max_len:
             current += " " + w
         else:
-            chunks.append(current)
+            if _has_speakable_content(current):
+                chunks.append(current)
             if len(w) <= max_len:
                 current = w
             else:
                 for i in range(0, len(w), max_len):
                     part = w[i:i + max_len]
                     if i + max_len < len(w):
-                        chunks.append(part)
+                        if _has_speakable_content(part):
+                            chunks.append(part)
                     else:
                         current = part
-    if current:
+    if current and _has_speakable_content(current):
         chunks.append(current)
     return chunks
 
 
 def smart_split_into_sentences(text: str) -> list:
+    if not text or not _has_speakable_content(text):
+        return []
     try:
-        pattern = r'(?<!\bMr)(?<!\bDr)(?<!\bMs)(?<!\bMrs)(?<!\bProf)(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)\s*[.!?\n]\s+'
-        sentences = re.split(pattern, text)
+        pattern = (
+            r'(?<!\bMr)(?<!\bDr)(?<!\bMs)(?<!\bMrs)(?<!\bProf)'
+            r'(?<!\bSr)(?<!\bJr)(?<!\bSt)(?<!\bNo)(?<!\bRs)'
+            r'(?<!\be\.g)(?<!\bi\.e)(?<!\betc)(?<!\bvs)(?<!\bFig)'
+            r'(?<=[.!?\n])\s+'
+        )
+        raw_sentences = []
+        for block in text.splitlines():
+            block = block.strip()
+            if block:
+                raw_sentences.extend(re.split(pattern, block))
+
         final_chunks = []
 
-        for s in sentences:
+        for s in raw_sentences:
             s = s.strip()
-            if not s:
+            if not _has_speakable_content(s):
                 continue
 
             if not final_chunks and len(s) > 65:
-                clause_match = re.match(r'^(.{12,70}?[,;:—\-])\s+(.+)$', s)
+                clause_match = re.match(r'^(.{15,70}?[,;:—])\s+(.+)$', s)
                 if clause_match:
                     first_part = clause_match.group(1).strip()
                     rest_part = clause_match.group(2).strip()
-                    if first_part:
+                    if _has_speakable_content(first_part) and _has_speakable_content(rest_part):
                         final_chunks.append(first_part)
                         s = rest_part
 
             if len(s) > 180:
-                sub_parts = [sc.strip() for sc in re.split(r'[,;:]\s+', s) if sc.strip()]
+                sub_parts = [sc.strip() for sc in re.split(r'(?<=[,;:])\s+', s) if _has_speakable_content(sc)]
                 for sub in sub_parts:
                     if len(sub) > 180:
                         final_chunks.extend(_split_by_word_boundary(sub, 180))
@@ -373,6 +511,10 @@ def stop_speaking():
             pygame.mixer.stop()
         except Exception:
             pass
+        try:
+            pygame.mixer.music.stop()
+        except Exception:
+            pass
 
     cleared = _drain_audio_queue()
     if cleared:
@@ -382,72 +524,157 @@ def stop_speaking():
     _clear_word_sync()
 
 
-async def _fetch_edge_tts_fallback(sentence: str, gen_id: int) -> tuple:
+def _try_repair_edge_clock_skew(err: Exception) -> bool:
     try:
-        clean_sentence = re.sub(r'\[.*?\]', '', sentence).strip()
-        if not clean_sentence:
-            return b"", None
+        from edge_tts.drm import DRM
+        if hasattr(DRM, "handle_client_response_error"):
+            DRM.handle_client_response_error(err)
+            return True
+    except Exception:
+        pass
+    return False
 
-        cache_key = clean_sentence.lower().strip()
-        cached = _get_cached_audio("edge", clean_sentence)
-        if cached:
-            cached_timings = _edge_timings_cache.get(cache_key)
-            return cached, cached_timings
 
-        communicate = edge_tts.Communicate(
-            clean_sentence, EDGE_TTS_VOICE, rate='+18%', pitch='-4Hz'
-        )
-        audio_bytes = bytearray()
-        word_timings = []
-        async for chunk in communicate.stream():
-            if _stop_playback or gen_id != _speech_gen_id:
-                return b"", None
-            chunk_type = chunk.get("type")
-            if chunk_type == "audio":
-                audio_bytes.extend(chunk["data"])
-            elif chunk_type == "WordBoundary":
-                offset_ticks = int(chunk.get("offset", 0))
-                duration_ticks = int(chunk.get("duration", 0))
-                word_text = chunk.get("text", "")
-                if word_text:
-                    word_timings.append({
-                        "w": word_text,
-                        "s": offset_ticks / 10_000_000.0,
-                        "e": (offset_ticks + duration_ticks) / 10_000_000.0
-                    })
+async def _fetch_edge_tts_fallback(sentence: str, gen_id: int) -> tuple:
+    clean_sentence = _strip_bracketed_text(sentence).strip()
+    if not _has_speakable_content(clean_sentence):
+        return b"", None, False
 
-        result = bytes(audio_bytes)
-        if result and not _stop_playback and gen_id == _speech_gen_id:
-            _put_cached_audio("edge", clean_sentence, result)
-            if word_timings:
-                _edge_timings_cache[cache_key] = word_timings
-                _edge_timings_cache.move_to_end(cache_key)
-                while len(_edge_timings_cache) > _MAX_CACHE_ITEMS:
-                    _edge_timings_cache.popitem(last=False)
+    cache_key = clean_sentence.lower().strip()
+    cached = _get_cached_audio("edge", clean_sentence)
+    if cached:
+        cached_timings = _get_cached_edge_timings(cache_key)
+        return cached, cached_timings, False
 
-        return result, (word_timings if word_timings else None)
+    saw_403 = False
+    for attempt in range(2):
+        if _is_canceled(gen_id):
+            return b"", None, False
+
+        try:
+            communicate = edge_tts.Communicate(
+                clean_sentence, EDGE_TTS_VOICE, rate='+18%', pitch='-4Hz'
+            )
+            audio_bytes = bytearray()
+            word_timings = []
+
+            async def _collect_stream():
+                async for chunk in communicate.stream():
+                    if _is_canceled(gen_id):
+                        return False
+                    chunk_type = chunk.get("type")
+                    if chunk_type == "audio":
+                        audio_bytes.extend(chunk["data"])
+                    elif chunk_type == "WordBoundary":
+                        offset_ticks = int(chunk.get("offset", 0))
+                        duration_ticks = int(chunk.get("duration", 0))
+                        word_text = chunk.get("text", "")
+                        if word_text:
+                            word_timings.append({
+                                "w": word_text,
+                                "s": offset_ticks / 10_000_000.0,
+                                "e": (offset_ticks + duration_ticks) / 10_000_000.0
+                            })
+                return True
+
+            completed = await asyncio.wait_for(_collect_stream(), timeout=_EDGE_STREAM_TIMEOUT)
+            if not completed or _is_canceled(gen_id):
+                return b"", None, False
+
+            result = bytes(audio_bytes)
+            if result:
+                _put_cached_audio("edge", clean_sentence, result)
+                if word_timings:
+                    _put_cached_edge_timings(cache_key, word_timings)
+                return result, (word_timings if word_timings else None), False
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str:
+                saw_403 = True
+                if attempt == 0 and _try_repair_edge_clock_skew(e) and not _is_canceled(gen_id):
+                    continue
+                logger.warning("Edge-TTS returned 403 (blocked/clock-skew) — switching to Google TTS fallback")
+                break
+            if attempt == 0 and not _is_canceled(gen_id):
+                await asyncio.sleep(0.15)
+                continue
+            logger.error(f"Edge-TTS failed: {e}")
+
+    return b"", None, saw_403
+
+
+def _fetch_google_tts_fallback(http_session: requests.Session, sentence: str, gen_id: int) -> bytes:
+    clean_sentence = _strip_bracketed_text(sentence).strip()
+    if not _has_speakable_content(clean_sentence) or _is_canceled(gen_id):
+        return b""
+
+    cached = _get_cached_audio("gtts", clean_sentence)
+    if cached:
+        return cached
+
+    try:
+        sub_chunks = _split_by_word_boundary(clean_sentence, 160)
+        combined = bytearray()
+        for part in sub_chunks:
+            if _is_canceled(gen_id):
+                return b""
+            resp = http_session.get(
+                "https://translate.googleapis.com/translate_tts",
+                params={
+                    "ie": "UTF-8",
+                    "client": "tw-ob",
+                    "tl": "hi",
+                    "q": part,
+                },
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    )
+                },
+                timeout=(2.5, 5.0),
+            )
+            if resp.status_code == 200 and resp.content and len(resp.content) >= 100:
+                combined.extend(resp.content)
+            else:
+                return b""
+
+        result = bytes(combined)
+        if result and len(result) >= 100:
+            _put_cached_audio("gtts", clean_sentence, result)
+            return result
     except Exception as e:
-        logger.error(f"Edge-TTS failed: {e}")
-        return b"", None
+        logger.error(f"Google TTS fallback failed: {e}")
+
+    return b""
 
 
-def _producer_thread(sentences: list, gen_id: int):
-    global _stop_playback, _tts_limit_reached, _sarvam_cooldown_until
+def _producer_thread(sentences: list, gen_id: int, producer_done: threading.Event):
+    global _sarvam_consecutive_failures
 
     sarvam_count = 0
     edge_count = 0
+    gtts_count = 0
     failed_count = 0
     edge_loop = None
+    sarvam_failed_in_session = False
+    sarvam_timeouts_in_session = 0
+    edge_blocked_in_session = False
+    http_session = _create_http_session()
 
     try:
-        for sentence in sentences:
-            if _stop_playback or gen_id != _speech_gen_id:
+        for raw_sentence in sentences:
+            if _is_canceled(gen_id):
                 break
+
+            sentence = _strip_bracketed_text(raw_sentence).strip()
+            if not _has_speakable_content(sentence):
+                continue
 
             audio_data = None
             word_timings = None
 
-            if TTS_API_KEY and TTS_ENDPOINT and not _tts_limit_reached:
+            if not sarvam_failed_in_session and _is_sarvam_available():
                 cached = _get_cached_audio("sarvam", sentence)
                 if cached:
                     audio_data = cached
@@ -462,33 +689,34 @@ def _producer_thread(sentences: list, gen_id: int):
                         "speech_sample_rate": 24000
                     }
 
-                    for attempt in range(2):
-                        if _stop_playback or gen_id != _speech_gen_id:
-                            break
-                        try:
-                            response = _http_session.post(
-                                TTS_ENDPOINT,
-                                json=payload,
-                                headers={"api-subscription-key": TTS_API_KEY},
-                                timeout=(3.5, 8.0)
-                            )
+                    try:
+                        response = http_session.post(
+                            TTS_ENDPOINT,
+                            json=payload,
+                            headers={"api-subscription-key": TTS_API_KEY},
+                            timeout=(2.5, 6.5)
+                        )
 
-                            if response.status_code == 200:
-                                body = response.json()
-                                if body.get("audios"):
-                                    audio_data = base64.b64decode(body["audios"][0])
-                                    if audio_data:
-                                        _put_cached_audio("sarvam", sentence, audio_data)
-                                        sarvam_count += 1
-                                    break
-                                _tts_limit_reached = True
-                                _sarvam_cooldown_until = time.time() + _SARVAM_COOLDOWN_SECONDS
+                        if response.status_code == 200:
+                            body = response.json()
+                            audios = body.get("audios")
+                            if audios and audios[0]:
+                                decoded = base64.b64decode(audios[0])
+                                if decoded and len(decoded) >= 100:
+                                    audio_data = decoded
+                                    _put_cached_audio("sarvam", sentence, audio_data)
+                                    sarvam_count += 1
+                                    sarvam_timeouts_in_session = 0
+                                    with _state_lock:
+                                        _sarvam_consecutive_failures = 0
+                            if not audio_data:
+                                sarvam_failed_in_session = True
+                                _set_sarvam_cooldown(_SARVAM_COOLDOWN_SECONDS)
                                 logger.warning(
-                                    "Sarvam returned 200 without audio data — "
-                                    "likely quota exhausted. Switching to Edge-TTS for 15m"
+                                    "Sarvam returned 200 without valid audio — switching to fallback for 15m"
                                 )
-                                break
-
+                        else:
+                            sarvam_failed_in_session = True
                             body_lower = ""
                             try:
                                 body_lower = response.text.lower()
@@ -498,7 +726,7 @@ def _producer_thread(sentences: list, gen_id: int):
                             quota_keywords = (
                                 "limit", "quota", "exceed", "expired",
                                 "unauthorized", "subscription", "insufficient",
-                                "credits", "forbidden", "payment"
+                                "credits", "forbidden", "payment", "rate"
                             )
                             is_quota_or_auth = (
                                 response.status_code in (401, 402, 403, 429)
@@ -506,27 +734,53 @@ def _producer_thread(sentences: list, gen_id: int):
                             )
 
                             if is_quota_or_auth:
-                                _tts_limit_reached = True
-                                _sarvam_cooldown_until = time.time() + _SARVAM_COOLDOWN_SECONDS
+                                _set_sarvam_cooldown(_SARVAM_COOLDOWN_SECONDS)
                                 logger.warning(
-                                    f"Sarvam quota/auth error {response.status_code} — "
-                                    f"switching to Edge-TTS for 15m"
+                                    f"Sarvam quota/auth error {response.status_code} — switching to fallback for 15m"
                                 )
                             else:
-                                logger.error(f"Sarvam TTS error {response.status_code}")
-                            break
-                        except Exception as e:
-                            if attempt == 0:
-                                continue
-                            logger.error(f"Sarvam TTS request failed: {e}")
+                                with _state_lock:
+                                    _sarvam_consecutive_failures += 1
+                                    consec = _sarvam_consecutive_failures
+                                if consec >= 2:
+                                    _set_sarvam_cooldown(_SARVAM_TRANSIENT_COOLDOWN_SECONDS)
+                                    logger.warning(
+                                        f"Sarvam error {response.status_code} (repeated) — switching to fallback for 2m"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Sarvam TTS error {response.status_code} — falling back"
+                                    )
+                    except requests.exceptions.Timeout as e:
+                        sarvam_timeouts_in_session += 1
+                        if sarvam_timeouts_in_session >= 2:
+                            sarvam_failed_in_session = True
+                        logger.warning(f"Sarvam TTS timeout ({e}) — falling back for this chunk")
+                    except Exception as e:
+                        sarvam_failed_in_session = True
+                        with _state_lock:
+                            _sarvam_consecutive_failures += 1
+                            consec = _sarvam_consecutive_failures
+                        if consec >= 2:
+                            _set_sarvam_cooldown(_SARVAM_TRANSIENT_COOLDOWN_SECONDS)
+                            logger.warning(f"Sarvam request failed repeatedly ({e}) — switching to fallback for 2m")
+                        else:
+                            logger.warning(f"Sarvam TTS request failed ({e}) — falling back")
 
-            if not audio_data and EDGE_TTS_AVAILABLE and not _stop_playback and gen_id == _speech_gen_id:
+            if (
+                not audio_data
+                and EDGE_TTS_AVAILABLE
+                and not edge_blocked_in_session
+                and not _is_canceled(gen_id)
+            ):
                 try:
                     if edge_loop is None:
                         edge_loop = asyncio.new_event_loop()
-                    audio_data, word_timings = edge_loop.run_until_complete(
+                    audio_data, word_timings, saw_403 = edge_loop.run_until_complete(
                         _fetch_edge_tts_fallback(sentence, gen_id)
                     )
+                    if saw_403:
+                        edge_blocked_in_session = True
                     if audio_data:
                         edge_count += 1
                 except Exception as e:
@@ -534,24 +788,33 @@ def _producer_thread(sentences: list, gen_id: int):
                     audio_data = None
                     word_timings = None
 
-            if _stop_playback or gen_id != _speech_gen_id:
+            if not audio_data and not _is_canceled(gen_id):
+                audio_data = _fetch_google_tts_fallback(http_session, sentence, gen_id)
+                if audio_data:
+                    gtts_count += 1
+
+            if _is_canceled(gen_id):
                 break
 
-            if audio_data:
+            if audio_data and len(audio_data) >= 100:
                 _audio_queue.put((gen_id, audio_data, sentence, word_timings))
             else:
                 failed_count += 1
 
-        if not _stop_playback and gen_id == _speech_gen_id:
-            try:
-                _audio_queue.put((gen_id, None, "", None), timeout=5)
-            except queue.Full:
-                logger.warning("Audio queue full, sentinel not queued")
-
         logger.info(
-            f"TTS producer done | sarvam={sarvam_count} edge={edge_count} failed={failed_count}"
+            f"TTS producer done | sarvam={sarvam_count} edge={edge_count} gtts={gtts_count} failed={failed_count}"
         )
     finally:
+        producer_done.set()
+        if not _is_canceled(gen_id):
+            try:
+                _audio_queue.put((gen_id, None, "", None), timeout=2.0)
+            except Exception:
+                pass
+        try:
+            http_session.close()
+        except Exception:
+            pass
         if edge_loop is not None:
             try:
                 edge_loop.close()
@@ -559,18 +822,116 @@ def _producer_thread(sentences: list, gen_id: int):
                 pass
 
 
-def _consumer_thread(gen_id: int):
-    global _stop_playback, _start_time, _last_sentence_id
-    first_chunk = True
-    chunks_played = 0
-    clock = pygame.time.Clock()
-
-    while not _stop_playback and gen_id == _speech_gen_id:
+def _estimate_duration(chunk: bytes, word_timings: list, sentence: str) -> float:
+    if word_timings:
         try:
-            item = _audio_queue.get(timeout=20.0)
+            last_end = float(word_timings[-1].get("e", 0.0) or 0.0)
+            if last_end > 0.05:
+                return last_end + 0.08
+        except Exception:
+            pass
+    if chunk:
+        est = len(chunk) / 6000.0
+        if est > 0.15:
+            return est
+    words = len(sentence.split()) if sentence else 1
+    return max(0.4, words * 0.32)
+
+
+def _play_chunk_on_mixer(chunk: bytes, sentence: str, word_timings: list, gen_id: int, clock) -> bool:
+    global _last_sentence_id
+
+    if not _ensure_mixer_ready():
+        return False
+
+    sound = None
+    try:
+        sound = pygame.mixer.Sound(BytesIO(chunk))
+    except Exception:
+        try:
+            pygame.mixer.quit()
+        except Exception:
+            pass
+        if _ensure_mixer_ready():
+            try:
+                sound = pygame.mixer.Sound(BytesIO(chunk))
+            except Exception:
+                sound = None
+
+    if _is_canceled(gen_id):
+        return False
+
+    if sound is not None:
+        try:
+            duration = float(sound.get_length())
+        except Exception:
+            duration = 0.0
+
+        if duration <= 0.05:
+            duration = _estimate_duration(chunk, word_timings, sentence)
+
+        if not word_timings and duration > 0 and sentence:
+            word_timings = _compute_weighted_word_timings(sentence, duration)
+
+        try:
+            channel = sound.play()
+            audio_start = time.time()
+
+            if word_timings and sentence:
+                _last_sentence_id += 1
+                _write_word_sync(_last_sentence_id, sentence, audio_start, duration, word_timings)
+
+            while (channel.get_busy() if channel is not None else pygame.mixer.get_busy()):
+                if _is_canceled(gen_id):
+                    pygame.mixer.stop()
+                    return False
+                clock.tick(60)
+            return True
+        except Exception as e:
+            logger.warning(f"Sound.play fallback to music stream: {e}")
+
+    try:
+        duration = _estimate_duration(chunk, word_timings, sentence)
+        if not word_timings and duration > 0 and sentence:
+            word_timings = _compute_weighted_word_timings(sentence, duration)
+
+        pygame.mixer.music.load(BytesIO(chunk))
+        pygame.mixer.music.play()
+        audio_start = time.time()
+
+        if word_timings and sentence:
+            _last_sentence_id += 1
+            _write_word_sync(_last_sentence_id, sentence, audio_start, duration, word_timings)
+
+        while pygame.mixer.music.get_busy():
+            if _is_canceled(gen_id):
+                pygame.mixer.music.stop()
+                return False
+            clock.tick(60)
+        return True
+    except Exception as e:
+        logger.error(f"Audio playback failed completely: {e}")
+        return False
+
+
+def _consumer_thread(gen_id: int, producer_done: threading.Event):
+    first_chunk = True
+    clock = pygame.time.Clock()
+    last_activity_ts = time.time()
+
+    while not _is_canceled(gen_id):
+        try:
+            item = _audio_queue.get(timeout=0.4)
+            last_activity_ts = time.time()
         except queue.Empty:
-            logger.debug("Consumer timeout waiting for audio")
-            break
+            if _is_canceled(gen_id):
+                break
+            if producer_done.is_set() and _audio_queue.empty():
+                break
+            if (time.time() - last_activity_ts) > 25.0:
+                logger.warning("Consumer timed out waiting for producer audio")
+                break
+            continue
 
         sentence = ""
         word_timings = None
@@ -584,7 +945,7 @@ def _consumer_thread(gen_id: int):
         else:
             item_gen_id, chunk = gen_id, item
 
-        if item_gen_id != gen_id or gen_id != _speech_gen_id or _stop_playback:
+        if item_gen_id != gen_id or _is_canceled(gen_id):
             try:
                 _audio_queue.task_done()
             except ValueError:
@@ -605,50 +966,15 @@ def _consumer_thread(gen_id: int):
                 pass
             continue
 
-        try:
-            sound = pygame.mixer.Sound(BytesIO(chunk))
-        except Exception as e:
-            logger.error(f"Audio playback failed: {e}")
-            try:
-                _audio_queue.task_done()
-            except ValueError:
-                pass
-            continue
-
-        if _stop_playback or gen_id != _speech_gen_id:
-            try:
-                _audio_queue.task_done()
-            except ValueError:
-                pass
-            break
-
         if first_chunk:
-            reaction_time = time.time() - _start_time
+            with _state_lock:
+                started_at = _start_time
+            reaction_time = time.time() - started_at
             logger.info(f"First audio in {reaction_time:.2f}s")
             first_chunk = False
 
-        try:
-            duration = float(sound.get_length())
-        except Exception:
-            duration = 0.0
-
-        if not word_timings and duration > 0 and sentence:
-            word_timings = _compute_weighted_word_timings(sentence, duration)
-
-        sound.play()
-        audio_start = time.time()
-
-        if word_timings and sentence:
-            _last_sentence_id += 1
-            _write_word_sync(_last_sentence_id, sentence, audio_start, duration, word_timings)
-
-        chunks_played += 1
-
-        while pygame.mixer.get_busy():
-            if _stop_playback or gen_id != _speech_gen_id:
-                pygame.mixer.stop()
-                break
-            clock.tick(50)
+        _play_chunk_on_mixer(chunk, sentence, word_timings, gen_id, clock)
+        last_activity_ts = time.time()
 
         try:
             _audio_queue.task_done()
@@ -657,31 +983,25 @@ def _consumer_thread(gen_id: int):
 
 
 def speak(text: str):
-    global _stop_playback, is_speaking, _start_time, _tts_limit_reached, _speech_gen_id, _last_spoken_text
+    global _stop_playback, is_speaking, _start_time, _speech_gen_id, _last_spoken_text
 
     if not text:
-        return
-
-    if not _audio_output_available:
-        cleaned = clean_text_for_speech(text)
-        if cleaned:
-            logger.info(f"TTS text-only: {cleaned}")
         return
 
     cleaned = clean_text_for_speech(text)
     if not cleaned:
         return
 
-    _last_spoken_text = cleaned
+    if not _ensure_mixer_ready():
+        logger.info(f"TTS text-only: {cleaned}")
+        return
 
-    if is_speaking:
-        stop_speaking()
+    stop_speaking()
 
     with _state_lock:
+        _last_spoken_text = cleaned
         _speech_gen_id += 1
         current_gen_id = _speech_gen_id
-        if _tts_limit_reached and time.time() >= _sarvam_cooldown_until:
-            _tts_limit_reached = False
         _stop_playback = False
         is_speaking = True
         _start_time = time.time()
@@ -699,17 +1019,18 @@ def speak(text: str):
 
     logger.info(f"TTS speaking | sentences={len(sentences)} chars={len(cleaned)}")
 
+    producer_done = threading.Event()
     try:
         producer = threading.Thread(
             target=_producer_thread,
-            args=(sentences, current_gen_id),
+            args=(sentences, current_gen_id, producer_done),
             daemon=True
         )
         producer.start()
-        _consumer_thread(current_gen_id)
+        _consumer_thread(current_gen_id, producer_done)
     finally:
         with _state_lock:
-            is_current = _speech_gen_id == current_gen_id
+            is_current = (_speech_gen_id == current_gen_id)
             if is_current:
                 is_speaking = False
         _write_tts_state()
@@ -718,11 +1039,9 @@ def speak(text: str):
 
 
 def cleanup_temp():
+    global _tts_command_watcher_running
+    _tts_command_watcher_running = False
     stop_speaking()
-    try:
-        _http_session.close()
-    except Exception:
-        pass
     if _audio_output_available:
         try:
             pygame.mixer.quit()
@@ -731,6 +1050,7 @@ def cleanup_temp():
 
 
 os.makedirs("Data", exist_ok=True)
+_load_quota_state()
 _write_tts_state()
 threading.Thread(
     target=_tts_command_watcher_loop,
@@ -740,5 +1060,5 @@ threading.Thread(
 
 
 if __name__ == "__main__":
-    speak("Namaste boss! System live hai. TTS pipeline test ho raha hai.")
-    speak("Yeh engine network drops ko handle karta hai. Sab smooth chal raha hai.")
+    speak("[happy] Namaste boss! System live hai. [thinking] TTS pipeline test ho raha hai.")
+    speak("Yeh engine network drops aur [ignore_this] brackets ko handle karta hai. Sab smooth chal raha hai.")
