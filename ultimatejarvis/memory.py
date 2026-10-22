@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
 import threading
 from typing import Any
@@ -71,10 +72,12 @@ class LocalMemory:
             raise ValueError("Memory exceeds configured size limit")
         if not isinstance(category, str) or not category.strip() or len(category) > 80:
             raise ValueError("Category must contain 1-80 characters")
-        if isinstance(tags, str) or not all(isinstance(tag, str) and tag.strip() for tag in tags):
-            raise ValueError("Tags must be a sequence of non-empty strings")
+        if not isinstance(tags, (tuple, list)) or not all(
+            isinstance(tag, str) and tag.strip() for tag in tags
+        ):
+            raise ValueError("Tags must be a list or tuple of non-empty strings")
         normalized_tags = sorted({tag.strip()[:80] for tag in tags})
-        tags_text = " ".join(normalized_tags)
+        tags_text = json.dumps(normalized_tags, ensure_ascii=False)
         memory_id = uuid.uuid4().hex
         now = _now()
         with self._lock:
@@ -104,7 +107,7 @@ class LocalMemory:
         if row is None:
             raise KeyError(f"Unknown memory: {memory_id}")
         result = dict(row)
-        result["tags"] = result["tags"].split() if result["tags"] else []
+        result["tags"] = json.loads(result["tags"]) if result["tags"] else []
         return result
 
     def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
@@ -144,7 +147,7 @@ class LocalMemory:
         results = []
         for row in rows:
             item = dict(row)
-            item["tags"] = item["tags"].split() if item["tags"] else []
+            item["tags"] = json.loads(item["tags"]) if item["tags"] else []
             results.append(item)
         return results
 
