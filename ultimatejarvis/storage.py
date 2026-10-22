@@ -21,9 +21,9 @@ class SQLiteTaskStore:
     """
 
     def __init__(self, database: str | Path) -> None:
-        self.database = str(database)
+        self.database = ":memory:" if str(database) == ":memory:" else str(Path(database).expanduser().resolve())
         if self.database != ":memory:":
-            Path(self.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            Path(self.database).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(self.database, timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
