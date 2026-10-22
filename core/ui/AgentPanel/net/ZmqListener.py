@@ -1,8 +1,17 @@
 import queue
 import json
+import sys
 import zmq
 
 from PyQt5.QtCore import QThread, pyqtSignal
+
+
+def _log_error(msg):
+    if sys.__stderr__ is not None:
+        try:
+            sys.__stderr__.write(msg + "\n")
+        except Exception:
+            pass
 
 
 class AgentZmqListener(QThread):
@@ -19,7 +28,7 @@ class AgentZmqListener(QThread):
 
     def stop(self):
         self._running = False
-        self.wait(1000)
+        self.wait(300)
 
     def run(self):
         context = zmq.Context()
@@ -64,29 +73,35 @@ class AgentZmqListener(QThread):
 
                 if sub_socket in socks and socks[sub_socket] == zmq.POLLIN:
                     latest_data = None
-                    while self._running:
+                    for _ in range(100):
+                        if not self._running:
+                            break
                         try:
                             message = sub_socket.recv_string(flags=zmq.NOBLOCK)
                             topic, json_data = message.split(" ", 1)
                             latest_data = json.loads(json_data)
                         except zmq.Again:
                             break
-                        except Exception:
+                        except Exception as e:
+                            _log_error(f"ZmqListener status decode error: {e}")
                             break
                     if latest_data is not None:
                         self.status_received.emit(latest_data)
 
                 if confirm_pull in socks and socks[confirm_pull] == zmq.POLLIN:
-                    while self._running:
+                    for _ in range(100):
+                        if not self._running:
+                            break
                         try:
                             confirm_data = confirm_pull.recv_json(flags=zmq.NOBLOCK)
                             self.confirmation_requested.emit(confirm_data)
                         except zmq.Again:
                             break
-                        except Exception:
+                        except Exception as e:
+                            _log_error(f"ZmqListener confirm decode error: {e}")
                             break
-            except Exception:
-                pass
+            except Exception as e:
+                _log_error(f"ZmqListener loop error: {e}")
 
         try:
             sub_socket.close()

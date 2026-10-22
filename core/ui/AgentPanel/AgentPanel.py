@@ -1,7 +1,7 @@
 import sys
 import os
-import re
 import math
+from collections import deque
 
 if __name__ == "__main__" and __package__ in (None, ""):
     _bootstrap_here = os.path.dirname(os.path.abspath(__file__))
@@ -22,40 +22,21 @@ from PyQt5.QtWidgets import (
     QFrame, QSizePolicy, QPushButton, QTextEdit, QLineEdit
 )
 from PyQt5.QtGui import (
-    QFont, QFontDatabase, QFontMetrics, QCursor
+    QFont, QFontMetrics, QCursor
 )
 
-from .ThoughtViewer import ThoughtViewer
-from .ZmqListener import AgentZmqListener
-from .StatusOrb import StatusOrb
-from .IslandContainer import IslandContainer
-from .ObservationCard import ObservationCard
+from .widgets.ThoughtViewer import ThoughtViewer
+from .net.ZmqListener import AgentZmqListener
+from .widgets.StatusOrb import StatusOrb
+from .widgets.IslandContainer import IslandContainer
+from .widgets.ObservationCard import ObservationCard
+from .core.FontRegistry import (
+    install_substitutions, get_ui_font, get_hindi_font, get_code_font,
+)
+from .core.Theme import ACCENT_PALETTE, MOTION
 
 
 class AgentPanel(QWidget):
-    COLOR_MAP = {
-        "search": [10, 132, 255],
-        "deep_task": [255, 55, 95],
-        "python": [48, 130, 200],
-        "thinking": [191, 90, 242],
-        "workspace": [255, 159, 10],
-        "communication": [48, 209, 88],
-        "confirm_whatsapp": [37, 211, 102],
-        "confirm_telegram": [0, 152, 234],
-        "confirm_email": [255, 159, 10],
-        "gui": [94, 92, 230],
-        "mobile": [0, 212, 178],
-        "file_transfer": [0, 180, 160],
-        "file_ops": [255, 214, 10],
-        "terminal": [50, 215, 75],
-        "memory": [175, 82, 222],
-        "calendar": [90, 200, 250],
-        "clipboard": [255, 100, 130],
-        "image_gen": [255, 45, 85],
-        "done": [48, 209, 88],
-        "idle": [110, 110, 120],
-    }
-
     def __init__(self):
         super().__init__()
 
@@ -71,6 +52,7 @@ class AgentPanel(QWidget):
         self.resize_start_geom = QRect()
         self._interaction_origin = None
         self._override_cursor_active = False
+        self._cleaned = False
 
         self.DEFAULT_WIDTH = 580
         self.DEFAULT_HEIGHT = 196
@@ -82,7 +64,7 @@ class AgentPanel(QWidget):
         self.user_width = self.DEFAULT_WIDTH
         self.user_height = self.DEFAULT_HEIGHT
         self._user_resized = False
-        self.MAX_THOUGHT_CHARS = 24000
+        self.MAX_THOUGHT_CHARS = 6000
 
         self._raw_detail_text = ""
         self._raw_to_text = ""
@@ -99,36 +81,12 @@ class AgentPanel(QWidget):
         self._last_geom_key = None
         self._last_min_required_h = 0
 
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _font_candidates = [
-            os.path.join(_here, "Data", "fonts"),
-            os.path.join(_here, "..", "..", "Data", "fonts"),
-            os.path.join(os.getcwd(), "Data", "fonts"),
-            os.path.join(os.getcwd(), "..", "..", "Data", "fonts"),
-        ]
+        self._confirm_queue = deque()
 
-        def _load_font(filename: str):
-            for base in _font_candidates:
-                path = os.path.normpath(os.path.join(base, filename))
-                if os.path.exists(path):
-                    return QFontDatabase.addApplicationFont(path)
-            return -1
-
-        eng_id = _load_font("english.ttf")
-        eng_fams = QFontDatabase.applicationFontFamilies(eng_id) if eng_id != -1 else []
-        self.font_eng = eng_fams[0] if eng_fams else "Segoe UI"
-
-        hin_id = _load_font("devangri.ttf")
-        hin_fams = QFontDatabase.applicationFontFamilies(hin_id) if hin_id != -1 else []
-        self.font_hin = hin_fams[0] if hin_id != -1 and hin_fams else "Nirmala UI"
-
-        fallback_chain = [self.font_hin, "Nirmala UI", "Segoe UI", "Mangal"]
-        try:
-            QFont.insertSubstitutions(self.font_eng, fallback_chain)
-            QFont.insertSubstitutions("MS Shell Dlg 2", fallback_chain)
-            QFont.insertSubstitutions("Sansation", fallback_chain)
-        except Exception:
-            pass
+        install_substitutions()
+        self.font_eng = get_ui_font()
+        self.font_hin = get_hindi_font()
+        self.font_code = get_code_font()
 
         self.gradient_phase = 0.0
         self.current_action_type = "idle"
@@ -144,13 +102,18 @@ class AgentPanel(QWidget):
 
         self.thought_render_timer = QTimer(self)
         self.thought_render_timer.setSingleShot(True)
-        self.thought_render_timer.setInterval(50)
+        self.thought_render_timer.setInterval(MOTION["thought_throttle_ms"])
         self.thought_render_timer.timeout.connect(self.flush_pending_thought)
+
+        self._resize_relayout_timer = QTimer(self)
+        self._resize_relayout_timer.setSingleShot(True)
+        self._resize_relayout_timer.setInterval(MOTION["resize_relayout_ms"])
+        self._resize_relayout_timer.timeout.connect(self._resize_relayout_tick)
 
         self.target_geometry = None
         self.resize_anim = QPropertyAnimation(self, b"anim_geometry")
         self.resize_anim.setEasingCurve(QEasingCurve.OutQuint)
-        self.resize_anim.setDuration(210)
+        self.resize_anim.setDuration(MOTION["resize_anim_ms"])
 
         self.initUI()
 
@@ -164,11 +127,16 @@ class AgentPanel(QWidget):
         self.zmq_listener.start()
 
     def _cleanup_resources(self):
+        if self._cleaned:
+            return
+        self._cleaned = True
         self.clear_override_cursor()
         if self.rgb_timer.isActive():
             self.rgb_timer.stop()
         if self.thought_render_timer.isActive():
             self.thought_render_timer.stop()
+        if self._resize_relayout_timer.isActive():
+            self._resize_relayout_timer.stop()
         if hasattr(self, "zmq_listener") and self.zmq_listener.isRunning():
             self.zmq_listener.stop()
 
@@ -207,7 +175,8 @@ class AgentPanel(QWidget):
         self.container.setMinimumSize(0, 0)
 
         self.wrapper_layout = QVBoxLayout(self.container)
-        self.wrapper_layout.setContentsMargins(9, 7, 9, 11)
+        _ig = IslandContainer.island_grip_margins()
+        self.wrapper_layout.setContentsMargins(_ig[0], _ig[1], _ig[2], _ig[3])
         self.wrapper_layout.setSizeConstraint(QVBoxLayout.SetNoConstraint)
 
         self.inner_island = QFrame(self.container)
@@ -499,36 +468,38 @@ class AgentPanel(QWidget):
 
         self.hide_timer = QTimer(self)
         self.hide_timer.setSingleShot(True)
-        self.hide_timer.timeout.connect(self.hide_panel)
+        self.hide_timer.timeout.connect(self._auto_hide_check)
 
         self.setWindowOpacity(0.0)
         self.setCursor(Qt.ArrowCursor)
         self.hide()
 
+    def _auto_hide_check(self):
+        if self.awaiting_confirmation:
+            return
+        if self.is_dragging or self.is_resizing:
+            self.hide_timer.start(4000)
+            return
+        if self.underMouse():
+            self.hide_timer.start(4000)
+            return
+        self.hide_panel()
+
     def _resolve_mouse_coords(self, obj, event):
         local_pos = event.pos() if obj is self else obj.mapTo(self, event.pos())
-        raw_global = event.globalPos()
-        if raw_global == event.pos():
-            origin = (
-                self._interaction_origin
-                if (self.is_dragging or self.is_resizing) and self._interaction_origin is not None
-                else self.geometry().topLeft()
-            )
-            if origin != QPoint(0, 0):
-                global_pos = origin + local_pos
-            else:
-                global_pos = raw_global
-        else:
-            global_pos = raw_global
-        return local_pos, global_pos
+        return local_pos, QCursor.pos()
 
     def detect_resize_edge(self, local_pos: QPoint):
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return None
 
-        ix1, iy1 = 23, 17
-        ix2, iy2 = w - 23, h - 23
+        om = self.outer_layout.contentsMargins()
+        il, it, ir, ib = self.container.island_grip_margins()
+        ix1 = om.left() + il
+        iy1 = om.top() + it
+        ix2 = w - om.right() - ir
+        iy2 = h - om.bottom() - ib
         grip = 9
         corner_span = 22
 
@@ -549,13 +520,13 @@ class AgentPanel(QWidget):
         in_top_corner = y <= iy1 + corner_span
         in_bottom_corner = y >= iy2 - corner_span
 
-        if (near_top and in_left_corner) or (near_left and in_top_corner):
+        if near_top and in_left_corner:
             return "top_left"
-        if (near_top and in_right_corner) or (near_right and in_top_corner):
+        if near_top and in_right_corner:
             return "top_right"
-        if (near_bottom and in_left_corner) or (near_left and in_bottom_corner):
+        if near_bottom and in_left_corner:
             return "bottom_left"
-        if (near_bottom and in_right_corner) or (near_right and in_bottom_corner):
+        if near_bottom and in_right_corner:
             return "bottom_right"
         if near_left:
             return "left"
@@ -638,24 +609,28 @@ class AgentPanel(QWidget):
             or (self.obs_card.isVisible() and bool(self.obs_label.text().strip()))
         )
         in_confirm = self.awaiting_confirmation and self.preview_card.isVisible()
+        height_offset = 116 if has_extra_card else 106
 
         if not self._current_thought_text.strip():
             if has_extra_card:
                 self.thought_viewer.hide()
                 return 0
             if self._user_resized and not in_confirm:
-                available_h = max(28, self.user_height - 116)
+                available_h = max(28, self.user_height - height_offset)
                 self.thought_viewer.show()
-                self.thought_viewer.setFixedHeight(available_h)
+                if self.thought_viewer.height() != available_h:
+                    self.thought_viewer.setFixedHeight(available_h)
                 return available_h
+            idle_h = max(28, self.MIN_HEIGHT - 106)
             self.thought_viewer.show()
-            self.thought_viewer.setFixedHeight(32)
-            return 32
+            if self.thought_viewer.height() != idle_h:
+                self.thought_viewer.setFixedHeight(idle_h)
+            return idle_h
 
         if in_confirm:
             max_h = 88
         elif self._user_resized:
-            max_h = max(28, self.user_height - 116)
+            max_h = max(28, self.user_height - height_offset)
         else:
             max_h = max(88, self.user_height - 106)
 
@@ -666,7 +641,8 @@ class AgentPanel(QWidget):
         if self._user_resized and not in_confirm:
             clamped_h = max(28, max_h)
             self.thought_viewer.show()
-            self.thought_viewer.setFixedHeight(clamped_h)
+            if self.thought_viewer.height() != clamped_h:
+                self.thought_viewer.setFixedHeight(clamped_h)
             return clamped_h
 
         if (self._viewer_at_max_height
@@ -674,14 +650,16 @@ class AgentPanel(QWidget):
                 and self._last_sync_width == for_width
                 and len(self._current_thought_text) >= self._last_sync_text_len - 100):
             self.thought_viewer.show()
-            self.thought_viewer.setFixedHeight(max_h)
+            if self.thought_viewer.height() != max_h:
+                self.thought_viewer.setFixedHeight(max_h)
             return max_h
 
         if (self._last_sync_width == for_width
                 and self._last_sync_text == self._current_thought_text
                 and not in_confirm
                 and self._last_sync_height > 0):
-            self.thought_viewer.setFixedHeight(self._last_sync_height)
+            if self.thought_viewer.height() != self._last_sync_height:
+                self.thought_viewer.setFixedHeight(self._last_sync_height)
             return self._last_sync_height
 
         self.thought_viewer.show()
@@ -702,7 +680,8 @@ class AgentPanel(QWidget):
         self._last_sync_height = clamped_h
         self._last_sync_text_len = len(self._current_thought_text)
 
-        self.thought_viewer.setFixedHeight(clamped_h)
+        if self.thought_viewer.height() != clamped_h:
+            self.thought_viewer.setFixedHeight(clamped_h)
         if not self.thought_viewer.user_scrolled_up:
             vbar = self.thought_viewer.verticalScrollBar()
             vbar.setValue(vbar.maximum())
@@ -735,47 +714,96 @@ class AgentPanel(QWidget):
         start = self.resize_start_geom
         x, y, w, h = start.x(), start.y(), start.width(), start.height()
 
+        is_vertical = "top" in self.resize_edge or "bottom" in self.resize_edge
+        is_horizontal = "left" in self.resize_edge or "right" in self.resize_edge
+
         if "right" in self.resize_edge:
             w = max(self.MIN_WIDTH, min(self.MAX_WIDTH, start.width() + delta.x()))
         elif "left" in self.resize_edge:
             w = max(self.MIN_WIDTH, min(self.MAX_WIDTH, start.width() - delta.x()))
             x = start.right() - w + 1
 
-        self._invalidate_height_cache()
-
         if self.awaiting_confirmation and self.preview_card.isVisible():
-            thought_h = self.sync_thought_viewer_height(w)
             preview_h = self.get_extra_cards_height(w)
-            h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
-            if "top" in self.resize_edge:
-                y = start.bottom() - h + 1
-            self.user_width = w
-        else:
-            if "top" in self.resize_edge or "bottom" in self.resize_edge:
-                self._user_resized = True
-            extra_h = self.get_extra_cards_height(w)
-            min_total_h = self.MIN_HEIGHT + extra_h
-            max_total_h = self.MAX_HEIGHT + extra_h
-
-            if "bottom" in self.resize_edge:
-                h = max(min_total_h, min(max_total_h, start.height() + delta.y()))
-            elif "top" in self.resize_edge:
-                h = max(min_total_h, min(max_total_h, start.height() - delta.y()))
-                y = start.bottom() - h + 1
-
-            self.user_width = w
-            self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
             thought_h = self.sync_thought_viewer_height(w)
-            h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
+            h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
+            avail = QApplication.primaryScreen().availableGeometry().height() - 24
+            h = min(h, avail)
             if "top" in self.resize_edge:
                 y = start.bottom() - h + 1
+            self.user_width = w
+            self.user_height = max(
+                self.MIN_HEIGHT,
+                h - preview_h - (10 + thought_h if thought_h > 0 else 0) - 96,
+            )
+        else:
+            extra_h = self.get_extra_cards_height(w)
+
+            if is_vertical:
+                self._user_resized = True
+                min_total_h = self.MIN_HEIGHT + extra_h
+                max_total_h = self.MAX_HEIGHT + extra_h
+                if "bottom" in self.resize_edge:
+                    h = max(min_total_h, min(max_total_h, start.height() + delta.y()))
+                    y = start.y()
+                else:
+                    h = max(min_total_h, min(max_total_h, start.height() - delta.y()))
+                    y = start.bottom() - h + 1
+                self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
+
+            thought_h = self.sync_thought_viewer_height(w)
+
+            if is_horizontal:
+                h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
+                if "top" in self.resize_edge:
+                    y = start.bottom() - h + 1
+
+            self.user_width = w
+
+        if self._last_min_required_h > 0 and h < self._last_min_required_h:
+            h = self._last_min_required_h
+
+        screen = QApplication.primaryScreen().availableGeometry()
+        if x < screen.x():
+            x = screen.x()
+        if y < screen.y():
+            y = screen.y()
+        if x + w > screen.x() + screen.width():
+            x = screen.x() + screen.width() - w
+        if y + h > screen.y() + screen.height():
+            y = screen.y() + screen.height() - h
 
         self.custom_pos = QPoint(x, y)
-
         new_rect = QRect(x, y, w, h)
         self.target_geometry = new_rect
         self.setGeometry(new_rect)
         self.refresh_elided_labels()
+
+    def _resize_relayout_tick(self):
+        if not self.is_resizing:
+            return
+        is_vertical = "top" in self.resize_edge or "bottom" in self.resize_edge
+        if is_vertical:
+            return
+
+        self.sync_thought_viewer_height(self.width())
+        thought_h = self._last_sync_height if self._last_sync_height > 0 else 32
+
+        if self.awaiting_confirmation and self.preview_card.isVisible():
+            preview_h = self.get_extra_cards_height(self.width())
+            new_h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
+            avail = QApplication.primaryScreen().availableGeometry().height() - 24
+            new_h = min(new_h, avail)
+        else:
+            extra_h = self.get_extra_cards_height(self.width())
+            new_h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
+
+        curr = self.geometry()
+        self.setGeometry(curr.x(), curr.y(), curr.width(), new_h)
+        self.target_geometry = self.geometry()
+
+        if self.is_resizing:
+            self._resize_relayout_timer.start()
 
     def reset_to_default_size(self):
         self.user_width = self.DEFAULT_WIDTH
@@ -794,6 +822,20 @@ class AgentPanel(QWidget):
         if not self.isVisible() or not isinstance(obj, QWidget):
             return super().eventFilter(obj, event)
 
+        if event.type() == QEvent.KeyPress and self.awaiting_confirmation:
+            is_preview_widget = (
+                obj is self.preview_body_edit
+                or obj is self.preview_body_edit.viewport()
+                or obj is self.preview_subject_input
+            )
+            if is_preview_widget:
+                if event.key() == Qt.Key_Escape:
+                    self.handle_confirm_decision(False)
+                    return True
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter) and (event.modifiers() & Qt.ControlModifier):
+                    self.handle_confirm_decision(True)
+                    return True
+
         if obj is not self and not self.isAncestorOf(obj):
             return super().eventFilter(obj, event)
 
@@ -801,6 +843,17 @@ class AgentPanel(QWidget):
 
         if etype == QEvent.MouseMove:
             local_pos, global_pos = self._resolve_mouse_coords(obj, event)
+
+            if event.buttons() == Qt.NoButton and (self.is_dragging or self.is_resizing):
+                self.is_dragging = False
+                self.is_resizing = False
+                self.resize_edge = None
+                self._interaction_origin = None
+                if hasattr(self, "drag_position"):
+                    del self.drag_position
+                self._resize_relayout_timer.stop()
+                self.set_edge_cursor(self.detect_resize_edge(local_pos))
+                return False
 
             if self.is_resizing:
                 self.perform_interactive_resize(global_pos)
@@ -815,11 +868,18 @@ class AgentPanel(QWidget):
                 return True
 
             if event.buttons() == Qt.NoButton:
-                if self.is_interactive_child(obj) or self._is_link_click(obj, global_pos):
+                hovered = QApplication.widgetAt(global_pos)
+                is_hover_interactive = hovered is not None and self.is_interactive_child(hovered)
+                if is_hover_interactive or self._is_link_click(obj, global_pos):
                     self.clear_override_cursor()
                 else:
                     edge = self.detect_resize_edge(local_pos)
-                    self.set_edge_cursor(edge)
+                    if edge is not None:
+                        self.set_edge_cursor(edge)
+                    elif local_pos.y() <= 62:
+                        self.set_override_cursor_shape(Qt.OpenHandCursor)
+                    else:
+                        self.clear_override_cursor()
 
         elif etype == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             self._interaction_origin = self.geometry().topLeft()
@@ -852,6 +912,12 @@ class AgentPanel(QWidget):
                 self.is_resizing = False
                 self.resize_edge = None
                 self._interaction_origin = None
+                self._resize_relayout_timer.stop()
+                self._invalidate_height_cache()
+                self.sync_thought_viewer_height(self.width())
+                new_geom = self.calculate_target_geometry()
+                self.target_geometry = new_geom
+                self.setGeometry(new_geom)
                 self.set_edge_cursor(self.detect_resize_edge(local_pos))
                 return True
 
@@ -896,9 +962,6 @@ class AgentPanel(QWidget):
             max_att_w = max(220, curr_w - 120)
             self.preview_attachment_label.setText(fm_att.elidedText(self._raw_attachment_text, Qt.ElideRight, max_att_w))
 
-    def is_hindi(self, text):
-        return bool(re.search(r"[\u0900-\u097F]", str(text)))
-
     def format_tokens(self, n):
         if n >= 1000:
             val = n / 1000.0
@@ -907,23 +970,17 @@ class AgentPanel(QWidget):
         return str(n)
 
     def set_label_font(self, widget, text, base_size, weight=QFont.Medium):
-        if self.is_hindi(text):
-            font = QFont(self.font_hin, base_size + 1, weight)
-        else:
-            font = QFont(self.font_eng, base_size, weight)
-            font.setLetterSpacing(QFont.PercentageSpacing, 101)
+        font = QFont(self.font_eng, base_size, weight)
+        font.setLetterSpacing(QFont.PercentageSpacing, 101)
         widget.setFont(font)
 
     def render_thought_now(self):
         text = self._current_thought_text
-        stable_rgb = self.COLOR_MAP.get(self.current_action_type, [191, 90, 242])
+        stable_rgb = ACCENT_PALETTE.get(self.current_action_type, [191, 90, 242])
         if not text:
             self.thought_viewer.set_markdown_content("", self.font_eng, 12, stable_rgb)
             return
-        use_hin = self.is_hindi(text)
-        fam = self.font_hin if use_hin else self.font_eng
-        pt = 13 if use_hin else 12
-        self.thought_viewer.set_markdown_content(text, fam, pt, stable_rgb)
+        self.thought_viewer.set_markdown_content(text, self.font_eng, 12, stable_rgb)
 
     def schedule_thought_render(self, clean_thought: str):
         self._pending_thought_text = clean_thought
@@ -941,11 +998,11 @@ class AgentPanel(QWidget):
                 self.show_panel()
 
     def update_glow_effect(self):
-        self.gradient_phase += 0.045
+        self.gradient_phase += MOTION["phase_increment"]
         if self.gradient_phase >= math.pi * 2:
             self.gradient_phase -= math.pi * 2
 
-        self.target_rgb = self.COLOR_MAP.get(self.current_action_type, [191, 90, 242])
+        self.target_rgb = ACCENT_PALETTE.get(self.current_action_type, [191, 90, 242])
 
         for i in range(3):
             self.current_rgb[i] += (self.target_rgb[i] - self.current_rgb[i]) * 0.16
@@ -957,12 +1014,12 @@ class AgentPanel(QWidget):
 
     def reset_island_style(self):
         self.current_action_type = "idle"
-        self.target_rgb = [110, 110, 120]
+        self.target_rgb = [130, 140, 165]
         self._invalidate_height_cache()
 
     def start_pulse_animation(self):
         if not self.rgb_timer.isActive():
-            self.rgb_timer.start(50)
+            self.rgb_timer.start(MOTION["rgb_tick_ms"])
 
     def keyPressEvent(self, event):
         if self.awaiting_confirmation:
@@ -977,6 +1034,15 @@ class AgentPanel(QWidget):
         super().keyPressEvent(event)
 
     def calculate_target_geometry(self):
+        if self.custom_pos is not None:
+            visible = False
+            for screen in QApplication.screens():
+                if screen.availableGeometry().contains(self.custom_pos):
+                    visible = True
+                    break
+            if not visible:
+                self.custom_pos = None
+
         fixed_width = self.user_width
         thought_h = self.sync_thought_viewer_height(fixed_width)
         extra_height = self.get_extra_cards_height(fixed_width)
@@ -997,7 +1063,7 @@ class AgentPanel(QWidget):
             self._last_geom_key = geom_key
         fixed_height = max(fixed_height, self._last_min_required_h)
 
-        if getattr(self, "custom_pos", None) is not None:
+        if self.custom_pos is not None:
             return QRect(self.custom_pos.x(), self.custom_pos.y(), fixed_width, fixed_height)
 
         screen = QApplication.primaryScreen().availableGeometry()
@@ -1006,7 +1072,12 @@ class AgentPanel(QWidget):
         return QRect(x, y, fixed_width, fixed_height)
 
     def show_confirmation_preview(self, data: dict):
+        if self.awaiting_confirmation:
+            self._confirm_queue.append(data)
+            return
+
         self.hide_timer.stop()
+        self.last_status = None
         self.awaiting_confirmation = True
         self.active_confirm_id = data.get("request_id", "")
         platform = str(data.get("platform", "message")).lower()
@@ -1017,7 +1088,7 @@ class AgentPanel(QWidget):
         attachments = data.get("attachments") or []
 
         if not self.rgb_timer.isActive():
-            self.rgb_timer.start(50)
+            self.rgb_timer.start(MOTION["rgb_tick_ms"])
 
         theme_styles = {
             "whatsapp": (
@@ -1097,6 +1168,9 @@ class AgentPanel(QWidget):
             self.preview_subject_input.hide()
 
         self.set_label_font(self.preview_body_edit, body, 10, QFont.Normal)
+        body_font = QFont(self.font_eng, 10, QFont.Normal)
+        body_font.setLetterSpacing(QFont.PercentageSpacing, 101)
+        self.preview_body_edit.document().setDefaultFont(body_font)
         self.preview_body_edit.setPlainText(body)
 
         if attachments:
@@ -1129,6 +1203,7 @@ class AgentPanel(QWidget):
 
         self.awaiting_confirmation = False
         self.active_confirm_id = None
+        self.last_status = None
         self.preview_card.hide()
         self.preview_subject_input.hide()
         self.preview_attachment_label.hide()
@@ -1149,6 +1224,11 @@ class AgentPanel(QWidget):
             "body": edited_body,
         })
 
+        if self._confirm_queue:
+            next_data = self._confirm_queue.popleft()
+            self.show_confirmation_preview(next_data)
+            return
+
         self.show_panel()
 
     def show_panel(self):
@@ -1158,10 +1238,17 @@ class AgentPanel(QWidget):
             self.hide_anim_group.stop()
 
         if not self.rgb_timer.isActive():
-            self.rgb_timer.start(50)
+            self.rgb_timer.start(MOTION["rgb_tick_ms"])
+
+        if self.is_dragging or self.is_resizing:
+            return
 
         new_geometry = self.calculate_target_geometry()
         is_fading_in = hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running
+
+        if is_fading_in and new_geometry != self.target_geometry:
+            self.show_anim_group.stop()
+            is_fading_in = False
 
         if (self.isVisible()
                 and not is_fading_in
@@ -1193,7 +1280,7 @@ class AgentPanel(QWidget):
             self.show_anim_group = QParallelAnimationGroup(self)
 
             fade_in = QPropertyAnimation(self, b"windowOpacity")
-            fade_in.setDuration(230)
+            fade_in.setDuration(MOTION["fade_in_ms"])
             fade_in.setStartValue(self.windowOpacity())
             fade_in.setEndValue(1.0)
             fade_in.setEasingCurve(QEasingCurve.OutCubic)
@@ -1235,7 +1322,7 @@ class AgentPanel(QWidget):
         self.hide_anim_group = QParallelAnimationGroup(self)
 
         fade_out = QPropertyAnimation(self, b"windowOpacity")
-        fade_out.setDuration(210)
+        fade_out.setDuration(MOTION["fade_out_ms"])
         fade_out.setStartValue(self.windowOpacity())
         fade_out.setEndValue(0.0)
         fade_out.setEasingCurve(QEasingCurve.InOutQuad)
@@ -1359,7 +1446,7 @@ class AgentPanel(QWidget):
             self._invalidate_height_cache()
         else:
             if not self.rgb_timer.isActive():
-                self.rgb_timer.start(50)
+                self.rgb_timer.start(MOTION["rgb_tick_ms"])
 
         if is_task_complete:
             self.phase_label.setText("Done")
@@ -1428,13 +1515,18 @@ class AgentPanel(QWidget):
         if is_task_complete:
             if self.thought_render_timer.isActive():
                 self.thought_render_timer.stop()
-            self._pending_thought_text = None
+            if self._pending_thought_text is not None:
+                self.flush_pending_thought()
+            else:
+                self._pending_thought_text = None
             self.hide_timer.start(4000)
         else:
             self.hide_timer.stop()
 
 
 def run_panel():
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     panel = AgentPanel()
     sys.exit(app.exec_())

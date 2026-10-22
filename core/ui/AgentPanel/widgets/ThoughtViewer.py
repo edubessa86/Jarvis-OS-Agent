@@ -6,8 +6,8 @@ from PyQt5.QtGui import (
     QColor, QPainter, QPen, QTextFormat, QTextCursor, QBrush
 )
 
-from .styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
-from .MarkdownRenderer import MarkdownRenderer
+from ..styles import PREMIUM_SINGLE_LINE_SCROLLBAR_CSS
+from ..render.MarkdownRenderer import MarkdownRenderer
 
 
 class ThoughtViewer(QTextBrowser):
@@ -42,6 +42,7 @@ class ThoughtViewer(QTextBrowser):
         self._last_raw_text = ""
         self._last_render_key = None
         self._target_scroll_val = 0
+        self._code_groups_cache = None
 
         vbar = self.verticalScrollBar()
         self.smooth_scroll_anim = QPropertyAnimation(vbar, b"value", self)
@@ -50,6 +51,10 @@ class ThoughtViewer(QTextBrowser):
 
         vbar.sliderPressed.connect(self._on_user_slider_interaction)
         vbar.valueChanged.connect(self._on_vbar_value_changed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._code_groups_cache = None
 
     def mouseMoveEvent(self, event):
         super().mouseMoveEvent(event)
@@ -128,6 +133,7 @@ class ThoughtViewer(QTextBrowser):
             return
         self._last_render_key = key
         self._last_raw_text = raw_text
+        self._code_groups_cache = None
 
         if not raw_text.strip():
             self._updating_dom = True
@@ -148,6 +154,7 @@ class ThoughtViewer(QTextBrowser):
         self.setUpdatesEnabled(False)
         self.document().setHtml(rendered_html)
         self._post_process_code_blocks()
+        self._code_groups_cache = None
 
         new_max = vbar.maximum()
         if follow_bottom:
@@ -168,6 +175,49 @@ class ThoughtViewer(QTextBrowser):
             self.setUpdatesEnabled(True)
             self._updating_dom = False
 
+    def _get_code_groups(self):
+        if self._code_groups_cache is not None:
+            return self._code_groups_cache
+
+        doc = self.document()
+        if doc is None:
+            self._code_groups_cache = []
+            return self._code_groups_cache
+        layout = doc.documentLayout()
+        if layout is None:
+            self._code_groups_cache = []
+            return self._code_groups_cache
+
+        groups = []
+        current = None
+
+        block = doc.begin()
+        while block.isValid():
+            bf = block.blockFormat()
+            is_code = (
+                bf.hasProperty(self._CODE_MARKER_PROP)
+                and bool(bf.property(self._CODE_MARKER_PROP))
+            )
+            if is_code:
+                r = layout.blockBoundingRect(block)
+                if current is None:
+                    current = [r.top(), r.bottom(), r.left(), r.right()]
+                else:
+                    current[1] = r.bottom()
+                    current[2] = min(current[2], r.left())
+                    current[3] = max(current[3], r.right())
+            else:
+                if current is not None:
+                    groups.append(tuple(current))
+                    current = None
+            block = block.next()
+
+        if current is not None:
+            groups.append(tuple(current))
+
+        self._code_groups_cache = groups
+        return groups
+
     def paintEvent(self, event):
         self._paint_code_block_backgrounds()
         super().paintEvent(event)
@@ -175,11 +225,8 @@ class ThoughtViewer(QTextBrowser):
     def _paint_code_block_backgrounds(self):
         if self._updating_dom:
             return
-        doc = self.document()
-        if doc is None:
-            return
-        layout = doc.documentLayout()
-        if layout is None:
+        groups = self._get_code_groups()
+        if not groups:
             return
 
         vbar = self.verticalScrollBar()
@@ -191,53 +238,25 @@ class ThoughtViewer(QTextBrowser):
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        group_top = None
-        group_bottom = None
-        group_left = None
-        group_right = None
-
-        block = doc.begin()
-        while block.isValid():
-            bf = block.blockFormat()
-            is_code = (
-                bf.hasProperty(self._CODE_MARKER_PROP)
-                and bool(bf.property(self._CODE_MARKER_PROP))
-            )
-
-            if is_code:
-                r = layout.blockBoundingRect(block)
-                top = r.top() - offset_y
-                bottom = r.bottom() - offset_y
-                left = r.left() - offset_x
-                right = r.right() - offset_x
-
-                if group_top is None:
-                    group_top = top
-                    group_left = left
-                    group_right = right
-                group_bottom = bottom
-                group_left = min(group_left, left)
-                group_right = max(group_right, right)
-            else:
-                if group_top is not None:
-                    self._draw_code_bg(painter, group_top, group_bottom,
-                                       group_left, group_right, vp_h)
-                    group_top = None
-                    group_left = None
-                    group_right = None
-            block = block.next()
-
-        if group_top is not None:
-            self._draw_code_bg(painter, group_top, group_bottom,
-                               group_left, group_right, vp_h)
+        for top_doc, bottom_doc, left_doc, right_doc in groups:
+            top = top_doc - offset_y
+            bottom = bottom_doc - offset_y
+            if bottom <= -4 or top >= vp_h + 4:
+                continue
+            left = left_doc - offset_x
+            right = right_doc - offset_x
+            self._draw_code_bg(painter, top, bottom, left, right)
 
         painter.end()
 
-    def _draw_code_bg(self, painter, top, bottom, left, right, vp_h):
-        if bottom <= -4 or top >= vp_h + 4:
-            return
+    def _draw_code_bg(self, painter, top, bottom, left, right):
         pad = 2.0
-        rect = QRectF(left - pad, top - pad, (right - left) + 2 * pad, (bottom - top) + 2 * pad)
+        rect = QRectF(
+            left - pad,
+            top - pad,
+            (right - left) + 2 * pad,
+            (bottom - top) + 2 * pad,
+        )
         radius = 8.0
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._CODE_VISUAL_BG)
