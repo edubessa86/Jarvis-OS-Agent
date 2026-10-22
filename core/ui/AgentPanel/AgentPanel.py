@@ -64,7 +64,7 @@ class AgentPanel(QWidget):
         self.user_width = self.DEFAULT_WIDTH
         self.user_height = self.DEFAULT_HEIGHT
         self._user_resized = False
-        self.MAX_THOUGHT_CHARS = 6000
+        self.MAX_THOUGHT_CHARS = 50000
 
         self._raw_detail_text = ""
         self._raw_to_text = ""
@@ -684,7 +684,10 @@ class AgentPanel(QWidget):
             self.thought_viewer.setFixedHeight(clamped_h)
         if not self.thought_viewer.user_scrolled_up:
             vbar = self.thought_viewer.verticalScrollBar()
-            vbar.setValue(vbar.maximum())
+            if self.thought_viewer.smooth_scroll_anim.state() == QPropertyAnimation.Running:
+                self.thought_viewer.smooth_scroll_anim.setEndValue(vbar.maximum())
+            else:
+                vbar.setValue(vbar.maximum())
         return clamped_h
 
     def get_extra_cards_height(self, for_width: int) -> int:
@@ -995,7 +998,7 @@ class AgentPanel(QWidget):
         self.render_thought_now()
         if not self.hide_timer.isActive():
             if self.isVisible() or self._current_thought_text.strip():
-                self.show_panel()
+                self.show_panel(animate=False)
 
     def update_glow_effect(self):
         self.gradient_phase += MOTION["phase_increment"]
@@ -1231,7 +1234,7 @@ class AgentPanel(QWidget):
 
         self.show_panel()
 
-    def show_panel(self):
+    def show_panel(self, animate=True):
         self.hide_timer.stop()
 
         if hasattr(self, "hide_anim_group") and self.hide_anim_group.state() == QPropertyAnimation.Running:
@@ -1301,7 +1304,7 @@ class AgentPanel(QWidget):
                 if self.resize_anim.state() == QPropertyAnimation.Running:
                     self.resize_anim.stop()
 
-                if self.is_dragging or self.is_resizing:
+                if self.is_dragging or self.is_resizing or not animate:
                     self.setGeometry(new_geometry)
                 else:
                     self.resize_anim.setStartValue(self.geometry())
@@ -1380,6 +1383,38 @@ class AgentPanel(QWidget):
             base_title = f"{base_title} +{len(parts) - 1}"
         return base_title, act_type
 
+    def _trim_thought_safely(self, text: str) -> str:
+        if len(text) <= self.MAX_THOUGHT_CHARS:
+            return text
+
+        excess = len(text) - self.MAX_THOUGHT_CHARS
+        newline_pos = text.find("\n", excess)
+        if newline_pos == -1:
+            newline_pos = len(text) - 1
+        cutoff = newline_pos + 1
+
+        fences = []
+        i = 0
+        while True:
+            pos = text.find("```", i)
+            if pos == -1:
+                break
+            fences.append(pos)
+            i = pos + 3
+
+        fences_before = sum(1 for f in fences if f < cutoff)
+        if fences_before % 2 == 1:
+            last_opener = None
+            for f in fences:
+                if f < cutoff:
+                    last_opener = f
+                else:
+                    break
+            if last_opener is not None:
+                cutoff = last_opener
+
+        return "...\n" + text[cutoff:].strip()
+
     def process_status_update(self, status):
         if not isinstance(status, dict):
             return
@@ -1411,14 +1446,7 @@ class AgentPanel(QWidget):
                 self.phase_label.setText(f"Step {step:02}")
                 self.current_step = step
             if thought:
-                clean_thought = thought.strip()
-                if len(clean_thought) > self.MAX_THOUGHT_CHARS:
-                    cutoff_idx = len(clean_thought) - self.MAX_THOUGHT_CHARS
-                    newline_pos = clean_thought.find("\n", cutoff_idx)
-                    if newline_pos != -1:
-                        clean_thought = "...\n" + clean_thought[newline_pos + 1:].strip()
-                    else:
-                        clean_thought = "... " + clean_thought[-self.MAX_THOUGHT_CHARS:]
+                clean_thought = self._trim_thought_safely(thought.strip())
                 self._current_thought_text = clean_thought
                 self._pending_thought_text = None
                 self.render_thought_now()
@@ -1496,15 +1524,7 @@ class AgentPanel(QWidget):
                 self.obs_card.hide()
 
         if thought:
-            clean_thought = thought.strip()
-            if len(clean_thought) > self.MAX_THOUGHT_CHARS:
-                cutoff_idx = len(clean_thought) - self.MAX_THOUGHT_CHARS
-                newline_pos = clean_thought.find("\n", cutoff_idx)
-                if newline_pos != -1:
-                    clean_thought = "...\n" + clean_thought[newline_pos + 1:].strip()
-                else:
-                    clean_thought = "... " + clean_thought[-self.MAX_THOUGHT_CHARS:]
-
+            clean_thought = self._trim_thought_safely(thought.strip())
             self.schedule_thought_render(clean_thought)
         else:
             self.schedule_thought_render("")

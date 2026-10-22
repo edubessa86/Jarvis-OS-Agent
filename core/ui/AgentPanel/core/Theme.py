@@ -32,6 +32,10 @@ SYNTAX_TOKENS = {
     "func": "color: #50FA7B;",
     "number": "color: #BD93F9;",
     "default": "color: #F8F8F2;",
+    "shebang": "color: #7E88A6; font-style: italic;",
+    "preproc": "color: #50FA7B; font-weight: bold;",
+    "attribute": "color: #50FA7B;",
+    "private": "color: #FF79C6; font-weight: bold;",
 }
 
 TEXT_PRIMARY = "#FFFFFF"

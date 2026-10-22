@@ -51,6 +51,7 @@ class ThoughtViewer(QTextBrowser):
 
         vbar.sliderPressed.connect(self._on_user_slider_interaction)
         vbar.valueChanged.connect(self._on_vbar_value_changed)
+        self.smooth_scroll_anim.finished.connect(self._on_scroll_anim_finished)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -67,16 +68,21 @@ class ThoughtViewer(QTextBrowser):
         vbar = self.verticalScrollBar()
         self.user_scrolled_up = vbar.value() < max(0, vbar.maximum() - 14)
 
+    def _on_scroll_anim_finished(self):
+        self._target_scroll_val = self.verticalScrollBar().value()
+
     def _on_vbar_value_changed(self, value):
         if self._updating_dom:
             return
         vbar = self.verticalScrollBar()
         if vbar.isSliderDown():
             self.user_scrolled_up = value < max(0, vbar.maximum() - 14)
+        elif self.smooth_scroll_anim.state() != QPropertyAnimation.Running:
+            self.user_scrolled_up = value < max(0, vbar.maximum() - 14)
 
     def reset_scroll_lock(self):
         self.user_scrolled_up = False
-        self._target_scroll_val = 0
+        self._target_scroll_val = self.verticalScrollBar().value()
 
     def wheelEvent(self, event):
         vbar = self.verticalScrollBar()
@@ -107,6 +113,16 @@ class ThoughtViewer(QTextBrowser):
         self.smooth_scroll_anim.setEndValue(new_target)
         self.smooth_scroll_anim.start()
         event.accept()
+
+    def keyPressEvent(self, event):
+        if event.key() in (
+            Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown,
+            Qt.Key_Home, Qt.Key_End,
+        ):
+            if self.smooth_scroll_anim.state() == QPropertyAnimation.Running:
+                self.smooth_scroll_anim.stop()
+            self._target_scroll_val = self.verticalScrollBar().value()
+        super().keyPressEvent(event)
 
     def _post_process_code_blocks(self):
         doc = self.document()
@@ -146,9 +162,7 @@ class ThoughtViewer(QTextBrowser):
         vbar = self.verticalScrollBar()
         prev_val = vbar.value()
         follow_bottom = not self.user_scrolled_up
-
-        if self.smooth_scroll_anim.state() == QPropertyAnimation.Running and follow_bottom:
-            self.smooth_scroll_anim.stop()
+        anim_was_running = self.smooth_scroll_anim.state() == QPropertyAnimation.Running
 
         self._updating_dom = True
         self.setUpdatesEnabled(False)
@@ -158,20 +172,17 @@ class ThoughtViewer(QTextBrowser):
 
         new_max = vbar.maximum()
         if follow_bottom:
-            start_val = min(prev_val, new_max)
-            vbar.setValue(start_val)
+            if anim_was_running:
+                vbar.setValue(prev_val)
+                self.smooth_scroll_anim.setEndValue(new_max)
+            else:
+                vbar.setValue(new_max)
+            self._target_scroll_val = new_max
             self.setUpdatesEnabled(True)
             self._updating_dom = False
-            self._target_scroll_val = new_max
-            if abs(new_max - start_val) <= 3:
-                vbar.setValue(new_max)
-            else:
-                self.smooth_scroll_anim.setDuration(95)
-                self.smooth_scroll_anim.setStartValue(start_val)
-                self.smooth_scroll_anim.setEndValue(new_max)
-                self.smooth_scroll_anim.start()
         else:
             vbar.setValue(min(prev_val, new_max))
+            self._target_scroll_val = vbar.value()
             self.setUpdatesEnabled(True)
             self._updating_dom = False
 
