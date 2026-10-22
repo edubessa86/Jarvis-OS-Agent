@@ -53,6 +53,23 @@ def main() -> int:
     delete_parser = memory_sub.add_parser("delete", help="Delete a note by ID")
     delete_parser.add_argument("memory_id")
 
+    tasks_parser = subparsers.add_parser("tasks", help="Manage persistent local task history")
+    tasks_parser.add_argument("--db", type=Path, default=_default_data_dir() / "tasks.sqlite3",
+                              help="SQLite task database path")
+    tasks_sub = tasks_parser.add_subparsers(dest="tasks_command", required=True)
+    task_create = tasks_sub.add_parser("create", help="Create a task record (does not execute it)")
+    task_create.add_argument("task_id")
+    task_create.add_argument("prompt")
+    task_list = tasks_sub.add_parser("list", help="List recent task records")
+    task_list.add_argument("--limit", type=int, default=20)
+    task_show = tasks_sub.add_parser("show", help="Show one task and its event history")
+    task_show.add_argument("task_id")
+    task_transition = tasks_sub.add_parser("transition", help="Record an allowed task-state transition")
+    task_transition.add_argument("task_id")
+    task_transition.add_argument("state", choices=["planning", "waiting_approval", "running", "succeeded", "failed", "cancelled"])
+    task_transition.add_argument("message")
+    task_transition.add_argument("--error", help="Optional error detail, stored only when state is failed")
+
     args = parser.parse_args()
 
     if args.command == "diagnostics":
@@ -98,6 +115,24 @@ def main() -> int:
                 deleted = memory.delete(args.memory_id)
                 print(json.dumps({"deleted": deleted, "memory_id": args.memory_id}, ensure_ascii=False))
                 return 0 if deleted else 1
+        return 0
+
+    if args.command == "tasks":
+        from .orchestrator import TaskState
+        from .storage import SQLiteTaskStore
+
+        with SQLiteTaskStore(args.db) as store:
+            if args.tasks_command == "create":
+                result = store.create(args.task_id, args.prompt)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            elif args.tasks_command == "list":
+                print(json.dumps(store.list_tasks(limit=args.limit), ensure_ascii=False, indent=2))
+            elif args.tasks_command == "show":
+                print(json.dumps({"task": store.get(args.task_id), "events": store.events(args.task_id)},
+                                 ensure_ascii=False, indent=2))
+            elif args.tasks_command == "transition":
+                result = store.transition(args.task_id, TaskState(args.state), args.message, error=args.error)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     return 2
