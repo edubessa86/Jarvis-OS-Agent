@@ -82,7 +82,26 @@ def main() -> int:
     inspect_read = inspect_sub.add_parser("read-text", help="Read a UTF-8 text file in the workspace")
     inspect_read.add_argument("path", help="Relative file path within the workspace")
 
+    plan_parser = subparsers.add_parser("plan", help="Create a validated preview plan using local Ollama")
+    plan_parser.add_argument("--workspace", type=Path, default=Path.home() / "UltimateJarvisWorkspace", help="Workspace root for the read-only tool catalog")
+    plan_parser.add_argument("--model", default="qwen2.5:3b", help="Local Ollama model already installed")
+    plan_parser.add_argument("goal", help="Goal to plan; no tools are executed")
+
     args = parser.parse_args()
+
+    if args.command == "plan":
+        from .models import ModelGateway
+        from .ollama_provider import OllamaProvider
+        from .planner import create_plan
+        from .windows_tools import build_read_only_registry
+        try:
+            plan = create_plan(args.goal, ModelGateway([OllamaProvider(args.model)], max_output_tokens=700), build_read_only_registry(args.workspace))
+        except Exception as exc:
+            print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps({"goal": plan.goal, "provider": plan.provider, "model": plan.model, "executed": False,
+            "steps": [{"tool": step.tool, "arguments": step.arguments, "reason": step.reason, "risk": step.risk} for step in plan.steps]}, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "diagnostics":
         report = collect_diagnostics(args.workspace)
