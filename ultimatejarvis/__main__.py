@@ -87,7 +87,75 @@ def main() -> int:
     plan_parser.add_argument("--model", default="qwen2.5:3b", help="Local Ollama model already installed")
     plan_parser.add_argument("goal", help="Goal to plan; no tools are executed")
 
+    run_parser = subparsers.add_parser("run", help="Plan, review and explicitly approve read-only tool execution")
+    run_parser.add_argument("--workspace", type=Path, default=Path.home() / "UltimateJarvisWorkspace")
+    run_parser.add_argument("--model", default="qwen2.5:3b")
+    run_parser.add_argument("--audit-db", type=Path, default=_default_data_dir() / "tool-audit.sqlite3")
+    run_parser.add_argument("goal")
+
+    audit_parser = subparsers.add_parser("audit", help="Review recent local tool execution audit events")
+    audit_parser.add_argument("--db", type=Path, default=_default_data_dir() / "tool-audit.sqlite3")
+    audit_parser.add_argument("--limit", type=int, default=50)
+
     args = parser.parse_args()
+
+    if args.command == "run":
+        from .audit import SQLiteToolAuditLog
+        from .execution import execute_approved_plan
+        from .models import ModelGateway
+        from .ollama_provider import OllamaProvider
+        from .planner import create_plan
+        from .windows_tools import build_read_only_registry
+
+        try:
+            registry = build_read_only_registry(args.workspace)
+            plan = create_plan(args.goal, ModelGateway([OllamaProvider(args.model)], max_output_tokens=700), registry)
+        except Exception as exc:
+            print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        preview = {"goal": plan.goal, "provider": plan.provider, "model": plan.model,
+                   "executed": False,
+                   "steps": [{"tool": s.tool, "arguments": s.arguments, "reason": s.reason, "risk": s.risk}
+                             for s in plan.steps]}
+        print(json.dumps(preview, ensure_ascii=False, indent=2))
+        try:
+            confirmation = input("Digite APROVAR para revisar as etapas individualmente (qualquer outra resposta cancela): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("Execução cancelada.")
+            return 1
+        if confirmation != "APROVAR":
+            print("Nenhuma ferramenta foi executada.")
+            return 1
+
+        def approve_step(index, tool, arguments, reason):
+            print(json.dumps({"step": index, "tool": tool, "arguments": arguments, "reason": reason},
+                             ensure_ascii=False, indent=2))
+            try:
+                return input("Digite SIM para autorizar somente esta etapa: ").strip() == "SIM"
+            except (EOFError, KeyboardInterrupt):
+                return False
+
+        try:
+            with SQLiteToolAuditLog(args.audit_db) as audit_log:
+                results = execute_approved_plan(plan, registry, approve_step=approve_step, audit=audit_log.append)
+        except Exception as exc:
+            print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps({"executed": True, "results": [
+            {"step": r.index, "tool": r.tool, "status": r.status, "summary": r.reason, "value": r.value}
+            for r in results
+        ]}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "audit":
+        from .audit import SQLiteToolAuditLog
+        try:
+            with SQLiteToolAuditLog(args.db) as audit_log:
+                print(json.dumps(audit_log.recent(limit=args.limit), ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(json.dumps({"error": type(exc).__name__, "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        return 0
 
     if args.command == "plan":
         from .models import ModelGateway
