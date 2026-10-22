@@ -69,11 +69,14 @@ def _stop_sandbox(process: Any) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                check=False, timeout=5,
-            )
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                process.kill()
         else:
             process.kill()
         try:
