@@ -23,7 +23,7 @@ class PlannerTests(unittest.TestCase):
         plan = create_plan("Read notes.txt", ModelGateway([provider]), build_read_only_registry("."))
         self.assertEqual(plan.steps[0].tool, "workspace.read_text")
         self.assertEqual(plan.steps[0].risk, "read_only")
-        self.assertIn("Do not claim actions were performed", provider.prompt)
+        self.assertIn("do not claim actions were performed", provider.prompt)
 
     def test_rejects_unknown_tool(self):
         output = json.dumps({"goal":"bad","steps":[{"tool":"system.run_shell",
