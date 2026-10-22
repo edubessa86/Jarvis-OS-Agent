@@ -41,12 +41,21 @@ class MarkdownRenderer:
     LONG_TOKEN_RE = re.compile(r"\S{65,}")
 
     _highlight_cache = {}
-    _HTML_CACHE_LIMIT = 200
-    _HIGHLIGHT_CACHE_LIMIT = 400
     _html_cache = {}
+    _line_cache = {}
+    _HTML_CACHE_LIMIT = 120
+    _HIGHLIGHT_CACHE_LIMIT = 300
+    _LINE_CACHE_LIMIT = 1500
+
+    @classmethod
+    def _evict_oldest(cls, cache_dict, limit):
+        while len(cache_dict) > limit:
+            cache_dict.pop(next(iter(cache_dict)))
 
     @classmethod
     def _soft_wrap_long_tokens(cls, text: str) -> str:
+        if len(text) < 65:
+            return text
         def inject_zwsp(match):
             s = match.group(0)
             return "\u200b".join(s[i:i + 45] for i in range(0, len(s), 45))
@@ -54,6 +63,8 @@ class MarkdownRenderer:
 
     @classmethod
     def _apply_bold_italic(cls, text: str) -> str:
+        if "*" not in text and "_" not in text and "~" not in text:
+            return text
         text = cls.BOLD_ITALIC_RE.sub(
             f'<b style="color: {TEXT_PRIMARY};"><i>\\1</i></b>', text
         )
@@ -71,9 +82,8 @@ class MarkdownRenderer:
 
     @classmethod
     def auto_heal_markdown(cls, text: str) -> str:
-        fence_count = len(re.findall(r"```", text))
-        if fence_count % 2 != 0:
-            text = text + "\n```"
+        if text.count("```") % 2 != 0:
+            return text + "\n```"
         return text
 
     @classmethod
@@ -97,19 +107,17 @@ class MarkdownRenderer:
             result.append(html.escape(chunk))
 
         highlighted = "".join(result)
-        highlighted = highlighted.replace("\t", "    ")
-        return highlighted
+        return highlighted.replace("\t", "    ")
 
     @classmethod
     def highlight_code_cached(cls, code: str) -> str:
-        key = (hash(code), get_code_font())
+        key = (code, get_code_font())
         cached = cls._highlight_cache.get(key)
         if cached is not None:
             return cached
         result = cls.highlight_code(code)
-        if len(cls._highlight_cache) > cls._HIGHLIGHT_CACHE_LIMIT:
-            cls._highlight_cache.clear()
         cls._highlight_cache[key] = result
+        cls._evict_oldest(cls._highlight_cache, cls._HIGHLIGHT_CACHE_LIMIT)
         return result
 
     @classmethod
@@ -151,9 +159,11 @@ class MarkdownRenderer:
             )
             return f"@@LINK_{idx}@@"
 
-        processed = cls.INLINE_CODE_RE.sub(save_inline_code, text)
-        processed = cls.IMAGE_RE.sub(save_image, processed)
-        processed = cls.LINK_RE.sub(save_link, processed)
+        processed = cls.INLINE_CODE_RE.sub(save_inline_code, text) if "`" in text else text
+        if "![" in processed:
+            processed = cls.IMAGE_RE.sub(save_image, processed)
+        if "[" in processed:
+            processed = cls.LINK_RE.sub(save_link, processed)
         processed = html.escape(cls._soft_wrap_long_tokens(processed))
         processed = cls._apply_bold_italic(processed)
 
@@ -201,6 +211,81 @@ class MarkdownRenderer:
         return "".join(parts)
 
     @classmethod
+    def _render_single_line(cls, line: str, stripped: str, body_pt: int, accent_hex: str) -> str:
+        cache_key = (line, body_pt, accent_hex, get_code_font())
+        cached = cls._line_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if not stripped:
+            res = '<div style="height: 5px; font-size: 1pt;">&nbsp;</div>'
+        elif stripped in ("---", "***", "___"):
+            res = (
+                '<hr style="border: none; background-color: rgba(255, 255, 255, 0.12); '
+                'height: 1px; margin: 6px 0px;" />'
+            )
+        else:
+            h_match = cls.HEADING_RE.match(stripped) if stripped.startswith("#") else None
+            if h_match:
+                level = len(h_match.group(1))
+                h_text = cls.format_inline(h_match.group(2), accent_hex)
+                h_size = max(body_pt, body_pt + (4 - level))
+                h_color = TEXT_PRIMARY if level <= 2 else SYNTAX_TOKENS["builtin"].split("color: ")[1].split(";")[0]
+                margin_top = 8 if level <= 2 else 5
+                res = (
+                    f'<div style="margin-top: {margin_top}px; margin-bottom: 3px; '
+                    f'font-size: {h_size}pt; font-weight: bold; color: {h_color};">{h_text}</div>'
+                )
+            else:
+                bq_match = cls.BLOCKQUOTE_RE.match(stripped) if stripped.startswith(">") else None
+                if bq_match:
+                    depth = bq_match.group(1).count(">")
+                    q_content = bq_match.group(2).strip()
+                    margin = 8 + (depth - 1) * 12
+                    q_text = cls.format_inline(q_content, accent_hex)
+                    res = (
+                        f'<div style="margin: 3px 0px 3px {margin}px; color: rgba(210, 214, 235, 0.85); '
+                        f'font-style: italic;"><span style="color: {accent_hex}; font-weight: bold;">'
+                        f'▎ </span>{q_text}</div>'
+                    )
+                else:
+                    b_match = cls.BULLET_RE.match(line)
+                    if b_match:
+                        indent_px = 6 + min(36, len(b_match.group(1)) * 6)
+                        content = b_match.group(2)
+                        marker = "•"
+                        if content.startswith("[ ] "):
+                            marker = "☐"
+                            content = content[4:]
+                        elif content[:4].lower() == "[x] ":
+                            marker = "☑"
+                            content = content[4:]
+                        b_text = cls.format_inline(content, accent_hex)
+                        res = (
+                            f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
+                            f'<span style="color: {accent_hex}; font-weight: bold;">{marker}&nbsp;</span>{b_text}</div>'
+                        )
+                    else:
+                        n_match = cls.NUMBERED_RE.match(line)
+                        if n_match:
+                            indent_px = 6 + min(36, len(n_match.group(1)) * 6)
+                            num_str = n_match.group(2)
+                            n_text = cls.format_inline(n_match.group(3), accent_hex)
+                            res = (
+                                f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
+                                f'<span style="color: {accent_hex}; font-weight: bold;">{num_str}.&nbsp;</span>{n_text}</div>'
+                            )
+                        else:
+                            res = (
+                                f'<div style="margin-top: 2px; margin-bottom: 2px; line-height: 1.46; '
+                                f'word-wrap: break-word;">{cls.format_inline(line, accent_hex)}</div>'
+                            )
+
+        cls._line_cache[cache_key] = res
+        cls._evict_oldest(cls._line_cache, cls._LINE_CACHE_LIMIT)
+        return res
+
+    @classmethod
     def to_html(cls, raw_text: str, font_family: str, base_pt: int, accent_rgb: list) -> str:
         if not raw_text.strip():
             return ""
@@ -211,10 +296,8 @@ class MarkdownRenderer:
             return cached
 
         result = cls._build_html(raw_text, font_family, base_pt, accent_rgb)
-
-        if len(cls._html_cache) > cls._HTML_CACHE_LIMIT:
-            cls._html_cache.clear()
         cls._html_cache[cache_key] = result
+        cls._evict_oldest(cls._html_cache, cls._HTML_CACHE_LIMIT)
         return result
 
     @classmethod
@@ -245,7 +328,7 @@ class MarkdownRenderer:
             code_blocks.append(block_html)
             return f"@@CODEBLOCK_{idx}@@"
 
-        staged = cls.CODE_BLOCK_RE.sub(extract_code_block, healed)
+        staged = cls.CODE_BLOCK_RE.sub(extract_code_block, healed) if "```" in healed else healed
         lines = staged.split("\n")
         out_lines = []
         body_pt = max(10, base_pt - 1)
@@ -263,8 +346,8 @@ class MarkdownRenderer:
                 i += 1
                 continue
 
-            if cls.TABLE_ROW_RE.match(line) and i + 1 < total and cls.TABLE_SEP_RE.match(lines[i + 1]):
-                header_cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if "|" in stripped and cls.TABLE_ROW_RE.match(line) and i + 1 < total and cls.TABLE_SEP_RE.match(lines[i + 1]):
+                header_cells = [c.strip() for c in stripped.strip("|").split("|")]
                 i += 2
                 table_rows = []
                 while i < total and cls.TABLE_ROW_RE.match(lines[i]):
@@ -274,82 +357,7 @@ class MarkdownRenderer:
                 out_lines.append(cls._render_table_html(header_cells, table_rows, accent_hex))
                 continue
 
-            if not stripped:
-                out_lines.append('<div style="height: 5px; font-size: 1pt;">&nbsp;</div>')
-                i += 1
-                continue
-
-            if stripped in ("---", "***", "___"):
-                out_lines.append(
-                    '<hr style="border: none; background-color: rgba(255, 255, 255, 0.12); '
-                    'height: 1px; margin: 6px 0px;" />'
-                )
-                i += 1
-                continue
-
-            h_match = cls.HEADING_RE.match(stripped)
-            if h_match:
-                level = len(h_match.group(1))
-                h_text = cls.format_inline(h_match.group(2), accent_hex)
-                h_size = max(body_pt, body_pt + (4 - level))
-                h_color = TEXT_PRIMARY if level <= 2 else SYNTAX_TOKENS["builtin"].split("color: ")[1].split(";")[0]
-                margin_top = 8 if level <= 2 else 5
-                out_lines.append(
-                    f'<div style="margin-top: {margin_top}px; margin-bottom: 3px; '
-                    f'font-size: {h_size}pt; font-weight: bold; color: {h_color};">{h_text}</div>'
-                )
-                i += 1
-                continue
-
-            bq_match = cls.BLOCKQUOTE_RE.match(stripped)
-            if bq_match:
-                depth = bq_match.group(1).count(">")
-                q_content = bq_match.group(2).strip()
-                margin = 8 + (depth - 1) * 12
-                q_text = cls.format_inline(q_content, accent_hex)
-                out_lines.append(
-                    f'<div style="margin: 3px 0px 3px {margin}px; color: rgba(210, 214, 235, 0.85); '
-                    f'font-style: italic;"><span style="color: {accent_hex}; font-weight: bold;">'
-                    f'▎ </span>{q_text}</div>'
-                )
-                i += 1
-                continue
-
-            b_match = cls.BULLET_RE.match(line)
-            if b_match:
-                indent_px = 6 + min(36, len(b_match.group(1)) * 6)
-                content = b_match.group(2)
-                marker = "•"
-                if content.startswith("[ ] "):
-                    marker = "☐"
-                    content = content[4:]
-                elif content[:4].lower() == "[x] ":
-                    marker = "☑"
-                    content = content[4:]
-                b_text = cls.format_inline(content, accent_hex)
-                out_lines.append(
-                    f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
-                    f'<span style="color: {accent_hex}; font-weight: bold;">{marker}&nbsp;</span>{b_text}</div>'
-                )
-                i += 1
-                continue
-
-            n_match = cls.NUMBERED_RE.match(line)
-            if n_match:
-                indent_px = 6 + min(36, len(n_match.group(1)) * 6)
-                num_str = n_match.group(2)
-                n_text = cls.format_inline(n_match.group(3), accent_hex)
-                out_lines.append(
-                    f'<div style="margin-left: {indent_px}px; margin-top: 2px; margin-bottom: 2px;">'
-                    f'<span style="color: {accent_hex}; font-weight: bold;">{num_str}.&nbsp;</span>{n_text}</div>'
-                )
-                i += 1
-                continue
-
-            out_lines.append(
-                f'<div style="margin-top: 2px; margin-bottom: 2px; line-height: 1.46; '
-                f'word-wrap: break-word;">{cls.format_inline(line, accent_hex)}</div>'
-            )
+            out_lines.append(cls._render_single_line(line, stripped, body_pt, accent_hex))
             i += 1
 
         body_html = "".join(out_lines)

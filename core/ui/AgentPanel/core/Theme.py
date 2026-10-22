@@ -48,12 +48,12 @@ SURFACE_CODE_BG = "#0a0b10"
 
 MOTION = {
     "phase_increment": 0.03,
-    "resize_anim_ms": 210,
-    "fade_in_ms": 230,
-    "fade_out_ms": 210,
-    "thought_throttle_ms": 85,
-    "rgb_tick_ms": 50,
-    "resize_relayout_ms": 110,
+    "resize_anim_ms": 180,
+    "fade_in_ms": 210,
+    "fade_out_ms": 190,
+    "thought_throttle_ms": 65,
+    "rgb_tick_ms": 45,
+    "resize_relayout_ms": 60,
 }
 
 SPACING = {

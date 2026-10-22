@@ -20,7 +20,10 @@ class StatusOrb(QWidget):
         self._cached_icon_key = None
 
     def set_state(self, rgb, phase, mode):
-        self.rgb = rgb
+        new_rgb = [max(0, min(255, int(c))) for c in rgb]
+        if self.mode == mode == "done" and new_rgb == self.rgb:
+            return
+        self.rgb = new_rgb
         self.phase = phase
         self.mode = mode
         self.update()
@@ -238,9 +241,12 @@ class StatusOrb(QWidget):
         if self.mode in self._UNCACHEABLE_MODES:
             self._render_icon(painter, r, g, b)
         else:
-            key = self._icon_cache_key()
+            dpr = self.devicePixelRatioF()
+            key = (self._icon_cache_key(), dpr)
             if key != self._cached_icon_key or self._cached_icon is None:
-                pixmap = QPixmap(24, 24)
+                px_size = int(round(24 * dpr))
+                pixmap = QPixmap(px_size, px_size)
+                pixmap.setDevicePixelRatio(dpr)
                 pixmap.fill(Qt.transparent)
                 p = QPainter(pixmap)
                 p.setRenderHint(QPainter.Antialiasing, True)

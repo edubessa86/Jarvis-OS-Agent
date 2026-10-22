@@ -64,29 +64,37 @@ class AgentZmqListener(QThread):
                     try:
                         confirm_push.send_json(reply_data, flags=zmq.NOBLOCK)
                     except zmq.Again:
-                        try:
-                            confirm_push.send_json(reply_data)
-                        except Exception:
-                            pass
+                        self.reply_queue.put(reply_data)
+                        break
+                    except Exception:
+                        pass
 
                 socks = dict(poller.poll(25))
 
                 if sub_socket in socks and socks[sub_socket] == zmq.POLLIN:
-                    latest_data = None
+                    latest_raw = None
                     for _ in range(100):
                         if not self._running:
                             break
                         try:
                             message = sub_socket.recv_string(flags=zmq.NOBLOCK)
-                            topic, json_data = message.split(" ", 1)
-                            latest_data = json.loads(json_data)
+                            _, json_data = message.split(" ", 1)
+                            if '"step": 0' in json_data or '"step":0' in json_data or '"Initialized"' in json_data:
+                                parsed_special = json.loads(json_data)
+                                self.status_received.emit(parsed_special)
+                                latest_raw = None
+                            else:
+                                latest_raw = json_data
                         except zmq.Again:
                             break
                         except Exception as e:
                             _log_error(f"ZmqListener status decode error: {e}")
                             break
-                    if latest_data is not None:
-                        self.status_received.emit(latest_data)
+                    if latest_raw is not None:
+                        try:
+                            self.status_received.emit(json.loads(latest_raw))
+                        except Exception as e:
+                            _log_error(f"ZmqListener final decode error: {e}")
 
                 if confirm_pull in socks and socks[confirm_pull] == zmq.POLLIN:
                     for _ in range(100):

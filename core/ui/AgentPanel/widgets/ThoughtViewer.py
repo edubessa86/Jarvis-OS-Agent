@@ -43,11 +43,12 @@ class ThoughtViewer(QTextBrowser):
         self._last_render_key = None
         self._target_scroll_val = 0
         self._code_groups_cache = None
+        self._has_code_blocks = False
 
         vbar = self.verticalScrollBar()
         self.smooth_scroll_anim = QPropertyAnimation(vbar, b"value", self)
-        self.smooth_scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self.smooth_scroll_anim.setDuration(135)
+        self.smooth_scroll_anim.setEasingCurve(QEasingCurve.OutQuad)
+        self.smooth_scroll_anim.setDuration(110)
 
         vbar.sliderPressed.connect(self._on_user_slider_interaction)
         vbar.valueChanged.connect(self._on_vbar_value_changed)
@@ -96,22 +97,30 @@ class ThoughtViewer(QTextBrowser):
             return
 
         step = int(-delta_y * 0.65)
-        base_val = (
-            self._target_scroll_val
-            if self.smooth_scroll_anim.state() == QPropertyAnimation.Running
-            else vbar.value()
-        )
+        anim_running = self.smooth_scroll_anim.state() == QPropertyAnimation.Running
+        base_val = self._target_scroll_val if anim_running else vbar.value()
         new_target = max(vbar.minimum(), min(vbar.maximum(), base_val + step))
         self._target_scroll_val = new_target
-
         self.user_scrolled_up = new_target < max(0, vbar.maximum() - 14)
 
-        if self.smooth_scroll_anim.state() == QPropertyAnimation.Running:
-            self.smooth_scroll_anim.stop()
-        self.smooth_scroll_anim.setDuration(135)
-        self.smooth_scroll_anim.setStartValue(vbar.value())
-        self.smooth_scroll_anim.setEndValue(new_target)
-        self.smooth_scroll_anim.start()
+        if abs(new_target - vbar.value()) <= 2:
+            if anim_running:
+                self.smooth_scroll_anim.stop()
+            vbar.setValue(new_target)
+            event.accept()
+            return
+
+        if anim_running:
+            self.smooth_scroll_anim.pause()
+            self.smooth_scroll_anim.setStartValue(vbar.value())
+            self.smooth_scroll_anim.setEndValue(new_target)
+            self.smooth_scroll_anim.setCurrentTime(0)
+            self.smooth_scroll_anim.resume()
+        else:
+            self.smooth_scroll_anim.setDuration(110)
+            self.smooth_scroll_anim.setStartValue(vbar.value())
+            self.smooth_scroll_anim.setEndValue(new_target)
+            self.smooth_scroll_anim.start()
         event.accept()
 
     def keyPressEvent(self, event):
@@ -153,11 +162,13 @@ class ThoughtViewer(QTextBrowser):
 
         if not raw_text.strip():
             self._updating_dom = True
+            self._has_code_blocks = False
             self.clear()
             self._updating_dom = False
             return
 
         rendered_html = MarkdownRenderer.to_html(raw_text, font_family, base_pt, accent_rgb)
+        self._has_code_blocks = "<pre " in rendered_html
 
         vbar = self.verticalScrollBar()
         prev_val = vbar.value()
@@ -167,7 +178,8 @@ class ThoughtViewer(QTextBrowser):
         self._updating_dom = True
         self.setUpdatesEnabled(False)
         self.document().setHtml(rendered_html)
-        self._post_process_code_blocks()
+        if self._has_code_blocks:
+            self._post_process_code_blocks()
         self._code_groups_cache = None
 
         new_max = vbar.maximum()
@@ -178,25 +190,26 @@ class ThoughtViewer(QTextBrowser):
             else:
                 vbar.setValue(new_max)
             self._target_scroll_val = new_max
-            self.setUpdatesEnabled(True)
-            self._updating_dom = False
         else:
             vbar.setValue(min(prev_val, new_max))
             self._target_scroll_val = vbar.value()
-            self.setUpdatesEnabled(True)
-            self._updating_dom = False
+
+        self.setUpdatesEnabled(True)
+        self._updating_dom = False
 
     def _get_code_groups(self):
+        if not self._has_code_blocks:
+            return ()
         if self._code_groups_cache is not None:
             return self._code_groups_cache
 
         doc = self.document()
         if doc is None:
-            self._code_groups_cache = []
+            self._code_groups_cache = ()
             return self._code_groups_cache
         layout = doc.documentLayout()
         if layout is None:
-            self._code_groups_cache = []
+            self._code_groups_cache = ()
             return self._code_groups_cache
 
         groups = []
@@ -226,16 +239,15 @@ class ThoughtViewer(QTextBrowser):
         if current is not None:
             groups.append(tuple(current))
 
-        self._code_groups_cache = groups
-        return groups
+        self._code_groups_cache = tuple(groups)
+        return self._code_groups_cache
 
     def paintEvent(self, event):
-        self._paint_code_block_backgrounds()
+        if self._has_code_blocks and not self._updating_dom:
+            self._paint_code_block_backgrounds(event.rect())
         super().paintEvent(event)
 
-    def _paint_code_block_backgrounds(self):
-        if self._updating_dom:
-            return
+    def _paint_code_block_backgrounds(self, clip_rect):
         groups = self._get_code_groups()
         if not groups:
             return
@@ -244,15 +256,17 @@ class ThoughtViewer(QTextBrowser):
         hbar = self.horizontalScrollBar()
         offset_y = vbar.value() if vbar else 0
         offset_x = hbar.value() if hbar else 0
-        vp_h = self.viewport().height()
+        clip_top = clip_rect.top() - 4
+        clip_bottom = clip_rect.bottom() + 4
 
         painter = QPainter(self.viewport())
         painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setClipRect(clip_rect)
 
         for top_doc, bottom_doc, left_doc, right_doc in groups:
             top = top_doc - offset_y
             bottom = bottom_doc - offset_y
-            if bottom <= -4 or top >= vp_h + 4:
+            if bottom < clip_top or top > clip_bottom:
                 continue
             left = left_doc - offset_x
             right = right_doc - offset_x

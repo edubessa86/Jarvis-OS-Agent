@@ -80,6 +80,7 @@ class AgentPanel(QWidget):
         self._last_max_h = -1
         self._last_geom_key = None
         self._last_min_required_h = 0
+        self._font_cache = {}
 
         self._confirm_queue = deque()
 
@@ -112,10 +113,34 @@ class AgentPanel(QWidget):
 
         self.target_geometry = None
         self.resize_anim = QPropertyAnimation(self, b"anim_geometry")
-        self.resize_anim.setEasingCurve(QEasingCurve.OutQuint)
+        self.resize_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.resize_anim.setDuration(MOTION["resize_anim_ms"])
 
+        self.show_anim_group = QParallelAnimationGroup(self)
+        self._fade_in_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_in_anim.setDuration(MOTION["fade_in_ms"])
+        self._fade_in_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._show_geom_anim = QPropertyAnimation(self, b"anim_geometry")
+        self._show_geom_anim.setDuration(250)
+        self._show_geom_anim.setEasingCurve(QEasingCurve.OutQuint)
+        self.show_anim_group.addAnimation(self._fade_in_anim)
+        self.show_anim_group.addAnimation(self._show_geom_anim)
+
+        self.hide_anim_group = QParallelAnimationGroup(self)
+        self._fade_out_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_out_anim.setDuration(MOTION["fade_out_ms"])
+        self._fade_out_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._hide_geom_anim = QPropertyAnimation(self, b"anim_geometry")
+        self._hide_geom_anim.setDuration(210)
+        self._hide_geom_anim.setEasingCurve(QEasingCurve.InCubic)
+        self.hide_anim_group.addAnimation(self._fade_out_anim)
+        self.hide_anim_group.addAnimation(self._hide_geom_anim)
+        self.hide_anim_group.finished.connect(self._on_hidden_finished)
+
         self.initUI()
+
+        self.resize_anim.stateChanged.connect(self._on_geom_anim_state_changed)
+        self.show_anim_group.stateChanged.connect(self._on_geom_anim_state_changed)
 
         app = QApplication.instance()
         app.installEventFilter(self)
@@ -125,6 +150,15 @@ class AgentPanel(QWidget):
         self.zmq_listener.status_received.connect(self.process_status_update)
         self.zmq_listener.confirmation_requested.connect(self.show_confirmation_preview)
         self.zmq_listener.start()
+
+    def _on_geom_anim_state_changed(self, new_state, old_state):
+        any_running = (
+            self.resize_anim.state() == QPropertyAnimation.Running
+            or self.show_anim_group.state() == QPropertyAnimation.Running
+            or self.is_resizing
+        )
+        if hasattr(self, "container"):
+            self.container.set_interactive_resizing(any_running)
 
     def _cleanup_resources(self):
         if self._cleaned:
@@ -157,6 +191,15 @@ class AgentPanel(QWidget):
     @anim_geometry.setter
     def anim_geometry(self, rect):
         self.setGeometry(rect)
+
+    def _get_cached_font(self, base_size, weight=QFont.Medium):
+        key = (self.font_eng, base_size, weight)
+        f = self._font_cache.get(key)
+        if f is None:
+            f = QFont(self.font_eng, base_size, weight)
+            f.setLetterSpacing(QFont.PercentageSpacing, 101)
+            self._font_cache[key] = f
+        return f
 
     def initUI(self):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -211,7 +254,7 @@ class AgentPanel(QWidget):
         self.status_tag.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         self.detail_pill = QLabel("")
-        self.detail_pill.setFont(QFont(self.font_eng, 8, QFont.Medium))
+        self.detail_pill.setFont(self._get_cached_font(8, QFont.Medium))
         self.detail_pill.setStyleSheet("""
             QLabel {
                 color: rgba(235, 235, 245, 0.82);
@@ -291,7 +334,7 @@ class AgentPanel(QWidget):
         self.obs_label.setMinimumSize(0, 0)
         self.obs_label.setWordWrap(True)
         self.obs_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.obs_label.setFont(QFont(self.font_eng, 9, QFont.Normal))
+        self.obs_label.setFont(self._get_cached_font(9, QFont.Normal))
         self.obs_label.setStyleSheet("""
             QLabel {
                 color: rgba(232, 232, 244, 0.90);
@@ -339,7 +382,7 @@ class AgentPanel(QWidget):
         """)
 
         self.preview_to_label = QLabel("")
-        self.preview_to_label.setFont(QFont(self.font_eng, 9, QFont.Bold))
+        self.preview_to_label.setFont(self._get_cached_font(9, QFont.Bold))
         self.preview_to_label.setStyleSheet("""
             QLabel {
                 color: rgba(255, 255, 255, 0.92);
@@ -362,7 +405,7 @@ class AgentPanel(QWidget):
         self.preview_subject_input.setFixedHeight(30)
         self.preview_subject_input.setCursor(Qt.IBeamCursor)
         self.preview_subject_input.setPlaceholderText("Subject...")
-        self.preview_subject_input.setFont(QFont(self.font_eng, 10, QFont.Medium))
+        self.preview_subject_input.setFont(self._get_cached_font(10, QFont.Medium))
         self.preview_subject_input.setStyleSheet("""
             QLineEdit {
                 background-color: rgba(0, 0, 0, 0.36);
@@ -385,7 +428,9 @@ class AgentPanel(QWidget):
         self.preview_body_edit.setCursor(Qt.IBeamCursor)
         self.preview_body_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.preview_body_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.preview_body_edit.setFont(QFont(self.font_eng, 10, QFont.Normal))
+        body_font = self._get_cached_font(10, QFont.Normal)
+        self.preview_body_edit.setFont(body_font)
+        self.preview_body_edit.document().setDefaultFont(body_font)
         self.preview_body_edit.setStyleSheet("""
             QTextEdit {
                 background-color: rgba(0, 0, 0, 0.36);
@@ -406,7 +451,7 @@ class AgentPanel(QWidget):
         self.preview_attachment_label = QLabel("")
         self.preview_attachment_label.setMinimumSize(0, 0)
         self.preview_attachment_label.setFixedHeight(22)
-        self.preview_attachment_label.setFont(QFont(self.font_eng, 8, QFont.Bold))
+        self.preview_attachment_label.setFont(self._get_cached_font(8, QFont.Bold))
         self.preview_attachment_label.setStyleSheet("""
             QLabel {
                 color: rgba(235, 235, 245, 0.82);
@@ -593,7 +638,7 @@ class AgentPanel(QWidget):
     def stop_active_geometry_animations(self):
         if self.resize_anim.state() == QPropertyAnimation.Running:
             self.resize_anim.stop()
-        if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
+        if self.show_anim_group.state() == QPropertyAnimation.Running:
             self.show_anim_group.stop()
 
     def _invalidate_height_cache(self):
@@ -602,6 +647,12 @@ class AgentPanel(QWidget):
         self._last_sync_height = -1
         self._last_sync_text_len = 0
         self._viewer_at_max_height = False
+
+    def _unlock_thought_viewer_height(self):
+        if self.thought_viewer.minimumHeight() != 0:
+            self.thought_viewer.setMinimumHeight(0)
+        if self.thought_viewer.maximumHeight() != 16777215:
+            self.thought_viewer.setMaximumHeight(16777215)
 
     def sync_thought_viewer_height(self, for_width: int) -> int:
         has_extra_card = (
@@ -615,17 +666,11 @@ class AgentPanel(QWidget):
             if has_extra_card:
                 self.thought_viewer.hide()
                 return 0
-            if self._user_resized and not in_confirm:
-                available_h = max(28, self.user_height - height_offset)
-                self.thought_viewer.show()
-                if self.thought_viewer.height() != available_h:
-                    self.thought_viewer.setFixedHeight(available_h)
-                return available_h
-            idle_h = max(28, self.MIN_HEIGHT - 106)
+            self._unlock_thought_viewer_height()
             self.thought_viewer.show()
-            if self.thought_viewer.height() != idle_h:
-                self.thought_viewer.setFixedHeight(idle_h)
-            return idle_h
+            if self._user_resized and not in_confirm:
+                return max(28, self.user_height - height_offset)
+            return max(28, self.MIN_HEIGHT - 106)
 
         if in_confirm:
             max_h = 88
@@ -638,34 +683,29 @@ class AgentPanel(QWidget):
             self._last_max_h = max_h
             self._viewer_at_max_height = False
 
+        self._unlock_thought_viewer_height()
+        self.thought_viewer.show()
+
         if self._user_resized and not in_confirm:
-            clamped_h = max(28, max_h)
-            self.thought_viewer.show()
-            if self.thought_viewer.height() != clamped_h:
-                self.thought_viewer.setFixedHeight(clamped_h)
-            return clamped_h
+            return max(28, max_h)
 
         if (self._viewer_at_max_height
                 and not in_confirm
                 and self._last_sync_width == for_width
                 and len(self._current_thought_text) >= self._last_sync_text_len - 100):
-            self.thought_viewer.show()
-            if self.thought_viewer.height() != max_h:
-                self.thought_viewer.setFixedHeight(max_h)
             return max_h
 
         if (self._last_sync_width == for_width
                 and self._last_sync_text == self._current_thought_text
                 and not in_confirm
                 and self._last_sync_height > 0):
-            if self.thought_viewer.height() != self._last_sync_height:
-                self.thought_viewer.setFixedHeight(self._last_sync_height)
             return self._last_sync_height
 
-        self.thought_viewer.show()
         avail_w = max(200, for_width - 98)
         doc = self.thought_viewer.document()
-        doc.setTextWidth(avail_w)
+        if not self.thought_viewer.isVisible() or for_width != self.width() or doc.textWidth() <= 0:
+            if abs(doc.textWidth() - avail_w) > 8:
+                doc.setTextWidth(avail_w)
         doc_h = int(math.ceil(doc.size().height())) + 4
 
         if doc_h >= max_h:
@@ -679,15 +719,6 @@ class AgentPanel(QWidget):
         self._last_sync_text = self._current_thought_text
         self._last_sync_height = clamped_h
         self._last_sync_text_len = len(self._current_thought_text)
-
-        if self.thought_viewer.height() != clamped_h:
-            self.thought_viewer.setFixedHeight(clamped_h)
-        if not self.thought_viewer.user_scrolled_up:
-            vbar = self.thought_viewer.verticalScrollBar()
-            if self.thought_viewer.smooth_scroll_anim.state() == QPropertyAnimation.Running:
-                self.thought_viewer.smooth_scroll_anim.setEndValue(vbar.maximum())
-            else:
-                vbar.setValue(vbar.maximum())
         return clamped_h
 
     def get_extra_cards_height(self, for_width: int) -> int:
@@ -697,7 +728,8 @@ class AgentPanel(QWidget):
                 extra_height += 38
             if self.preview_attachment_label.isVisible():
                 extra_height += 30
-            self.preview_card.setFixedHeight(extra_height)
+            if self.preview_card.height() != extra_height:
+                self.preview_card.setFixedHeight(extra_height)
             return extra_height
         self.preview_card.setMinimumHeight(0)
         self.preview_card.setMaximumHeight(16777215)
@@ -706,7 +738,8 @@ class AgentPanel(QWidget):
             avail_w = max(180, for_width - 118)
             bound = fm.boundingRect(0, 0, avail_w, 300, Qt.TextWordWrap, self.obs_label.text())
             obs_h = min(90, max(36, bound.height() + 20))
-            self.obs_card.setFixedHeight(obs_h)
+            if self.obs_card.height() != obs_h:
+                self.obs_card.setFixedHeight(obs_h)
             return obs_h
         self.obs_card.setMinimumHeight(0)
         self.obs_card.setMaximumHeight(16777215)
@@ -728,7 +761,7 @@ class AgentPanel(QWidget):
 
         if self.awaiting_confirmation and self.preview_card.isVisible():
             preview_h = self.get_extra_cards_height(w)
-            thought_h = self.sync_thought_viewer_height(w)
+            thought_h = self._last_sync_height if self._last_sync_height > 0 else self.sync_thought_viewer_height(w)
             h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
             avail = QApplication.primaryScreen().availableGeometry().height() - 24
             h = min(h, avail)
@@ -754,17 +787,16 @@ class AgentPanel(QWidget):
                     y = start.bottom() - h + 1
                 self.user_height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, h - extra_h))
 
-            thought_h = self.sync_thought_viewer_height(w)
-
-            if is_horizontal:
-                h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
-                if "top" in self.resize_edge:
-                    y = start.bottom() - h + 1
+            elif is_horizontal:
+                if not self._resize_relayout_timer.isActive():
+                    self._resize_relayout_timer.start()
 
             self.user_width = w
 
         if self._last_min_required_h > 0 and h < self._last_min_required_h:
             h = self._last_min_required_h
+            if "top" in self.resize_edge:
+                y = start.bottom() - h + 1
 
         screen = QApplication.primaryScreen().availableGeometry()
         if x < screen.x():
@@ -779,34 +811,36 @@ class AgentPanel(QWidget):
         self.custom_pos = QPoint(x, y)
         new_rect = QRect(x, y, w, h)
         self.target_geometry = new_rect
-        self.setGeometry(new_rect)
-        self.refresh_elided_labels()
+        if new_rect != self.geometry():
+            self.setGeometry(new_rect)
 
     def _resize_relayout_tick(self):
         if not self.is_resizing:
             return
+        self.refresh_elided_labels()
         is_vertical = "top" in self.resize_edge or "bottom" in self.resize_edge
-        if is_vertical:
+        if is_vertical or self._user_resized:
             return
 
-        self.sync_thought_viewer_height(self.width())
-        thought_h = self._last_sync_height if self._last_sync_height > 0 else 32
+        w = self.width()
+        thought_h = self.sync_thought_viewer_height(w)
 
         if self.awaiting_confirmation and self.preview_card.isVisible():
-            preview_h = self.get_extra_cards_height(self.width())
+            preview_h = self.get_extra_cards_height(w)
             new_h = 96 + (10 + thought_h if thought_h > 0 else 0) + 10 + preview_h
             avail = QApplication.primaryScreen().availableGeometry().height() - 24
             new_h = min(new_h, avail)
         else:
-            extra_h = self.get_extra_cards_height(self.width())
+            extra_h = self.get_extra_cards_height(w)
             new_h = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_h if extra_h > 0 else 0)
 
-        curr = self.geometry()
-        self.setGeometry(curr.x(), curr.y(), curr.width(), new_h)
-        self.target_geometry = self.geometry()
+        if self._last_min_required_h > 0 and new_h < self._last_min_required_h:
+            new_h = self._last_min_required_h
 
-        if self.is_resizing:
-            self._resize_relayout_timer.start()
+        curr = self.geometry()
+        if abs(curr.height() - new_h) > 2:
+            self.setGeometry(curr.x(), curr.y(), curr.width(), new_h)
+            self.target_geometry = self.geometry()
 
     def reset_to_default_size(self):
         self.user_width = self.DEFAULT_WIDTH
@@ -855,6 +889,7 @@ class AgentPanel(QWidget):
                 if hasattr(self, "drag_position"):
                     del self.drag_position
                 self._resize_relayout_timer.stop()
+                self.container.set_interactive_resizing(False)
                 self.set_edge_cursor(self.detect_resize_edge(local_pos))
                 return False
 
@@ -871,9 +906,7 @@ class AgentPanel(QWidget):
                 return True
 
             if event.buttons() == Qt.NoButton:
-                hovered = QApplication.widgetAt(global_pos)
-                is_hover_interactive = hovered is not None and self.is_interactive_child(hovered)
-                if is_hover_interactive or self._is_link_click(obj, global_pos):
+                if self.is_interactive_child(obj) or self._is_link_click(obj, global_pos):
                     self.clear_override_cursor()
                 else:
                     edge = self.detect_resize_edge(local_pos)
@@ -899,6 +932,7 @@ class AgentPanel(QWidget):
                 self.resize_start_mouse = global_pos
                 self.resize_start_geom = self.geometry()
                 self.stop_active_geometry_animations()
+                self.container.set_interactive_resizing(True)
                 self.set_edge_cursor(edge)
                 return True
 
@@ -916,11 +950,13 @@ class AgentPanel(QWidget):
                 self.resize_edge = None
                 self._interaction_origin = None
                 self._resize_relayout_timer.stop()
+                self.container.set_interactive_resizing(False)
                 self._invalidate_height_cache()
                 self.sync_thought_viewer_height(self.width())
                 new_geom = self.calculate_target_geometry()
                 self.target_geometry = new_geom
                 self.setGeometry(new_geom)
+                self.refresh_elided_labels()
                 self.set_edge_cursor(self.detect_resize_edge(local_pos))
                 return True
 
@@ -973,9 +1009,9 @@ class AgentPanel(QWidget):
         return str(n)
 
     def set_label_font(self, widget, text, base_size, weight=QFont.Medium):
-        font = QFont(self.font_eng, base_size, weight)
-        font.setLetterSpacing(QFont.PercentageSpacing, 101)
-        widget.setFont(font)
+        font = self._get_cached_font(base_size, weight)
+        if widget.font() != font:
+            widget.setFont(font)
 
     def render_thought_now(self):
         text = self._current_thought_text
@@ -985,20 +1021,24 @@ class AgentPanel(QWidget):
             return
         self.thought_viewer.set_markdown_content(text, self.font_eng, 12, stable_rgb)
 
-    def schedule_thought_render(self, clean_thought: str):
-        self._pending_thought_text = clean_thought
+    def schedule_thought_render(self, raw_thought: str):
+        self._pending_thought_text = raw_thought
         if not self.thought_render_timer.isActive():
             self.thought_render_timer.start()
 
     def flush_pending_thought(self):
         if self._pending_thought_text is None:
             return
-        self._current_thought_text = self._pending_thought_text
+        raw_pending = self._pending_thought_text
         self._pending_thought_text = None
+        clean_thought = self._trim_thought_safely(raw_pending.strip()) if raw_pending else ""
+        if clean_thought == self._current_thought_text and self.isVisible():
+            return
+        self._current_thought_text = clean_thought
         self.render_thought_now()
         if not self.hide_timer.isActive():
             if self.isVisible() or self._current_thought_text.strip():
-                self.show_panel(animate=False)
+                self.show_panel(animate=True)
 
     def update_glow_effect(self):
         self.gradient_phase += MOTION["phase_increment"]
@@ -1007,13 +1047,23 @@ class AgentPanel(QWidget):
 
         self.target_rgb = ACCENT_PALETTE.get(self.current_action_type, [191, 90, 242])
 
+        max_diff = 0.0
         for i in range(3):
-            self.current_rgb[i] += (self.target_rgb[i] - self.current_rgb[i]) * 0.16
+            diff = self.target_rgb[i] - self.current_rgb[i]
+            if abs(diff) > max_diff:
+                max_diff = abs(diff)
+            if abs(diff) < 0.5:
+                self.current_rgb[i] = float(self.target_rgb[i])
+            else:
+                self.current_rgb[i] += diff * 0.18
 
         self.pulse_dot.set_state(self.current_rgb, self.gradient_phase, self.current_action_type)
         self.container.update_visuals(self.current_rgb, self.gradient_phase)
         if self.obs_card.isVisible():
             self.obs_card.set_accent(self.current_rgb)
+
+        if max_diff < 0.5 and self.current_action_type in ("done", "idle") and not self.awaiting_confirmation:
+            self.rgb_timer.stop()
 
     def reset_island_style(self):
         self.current_action_type = "idle"
@@ -1053,15 +1103,13 @@ class AgentPanel(QWidget):
         fixed_height = 96 + (10 + thought_h if thought_h > 0 else 0) + (10 + extra_height if extra_height > 0 else 0)
 
         geom_key = (
-            fixed_width, thought_h, extra_height,
+            fixed_width,
+            extra_height,
             self.preview_card.isVisible(),
             self.obs_card.isVisible(),
             bool(self._current_thought_text.strip()),
         )
         if geom_key != self._last_geom_key:
-            self.layout.activate()
-            self.wrapper_layout.activate()
-            self.outer_layout.activate()
             self._last_min_required_h = self.outer_layout.totalMinimumSize().height()
             self._last_geom_key = geom_key
         fixed_height = max(fixed_height, self._last_min_required_h)
@@ -1157,28 +1205,21 @@ class AgentPanel(QWidget):
         """)
 
         self._raw_to_text = f"To: {recipient}"
-        self.set_label_font(self.preview_to_label, self._raw_to_text, 9, QFont.Bold)
         fm = QFontMetrics(self.preview_to_label.font())
         max_to_w = max(180, self.user_width - 220)
         self.preview_to_label.setText(fm.elidedText(self._raw_to_text, Qt.ElideRight, max_to_w))
 
         if platform == "email":
-            self.set_label_font(self.preview_subject_input, subject, 10)
             self.preview_subject_input.setText(subject)
             self.preview_subject_input.show()
         else:
             self.preview_subject_input.clear()
             self.preview_subject_input.hide()
 
-        self.set_label_font(self.preview_body_edit, body, 10, QFont.Normal)
-        body_font = QFont(self.font_eng, 10, QFont.Normal)
-        body_font.setLetterSpacing(QFont.PercentageSpacing, 101)
-        self.preview_body_edit.document().setDefaultFont(body_font)
         self.preview_body_edit.setPlainText(body)
 
         if attachments:
             self._raw_attachment_text = f"Attachment: {', '.join(attachments)}"
-            self.set_label_font(self.preview_attachment_label, self._raw_attachment_text, 8, QFont.Bold)
             fm_att = QFontMetrics(self.preview_attachment_label.font())
             max_att_w = max(220, self.user_width - 120)
             self.preview_attachment_label.setText(fm_att.elidedText(self._raw_attachment_text, Qt.ElideRight, max_att_w))
@@ -1220,6 +1261,9 @@ class AgentPanel(QWidget):
             self.current_action_type = "idle"
             self.status_tag.setText("Message Cancelled")
 
+        if not self.rgb_timer.isActive():
+            self.rgb_timer.start(MOTION["rgb_tick_ms"])
+
         self.zmq_listener.send_decision({
             "request_id": req_id,
             "approved": approved,
@@ -1237,7 +1281,7 @@ class AgentPanel(QWidget):
     def show_panel(self, animate=True):
         self.hide_timer.stop()
 
-        if hasattr(self, "hide_anim_group") and self.hide_anim_group.state() == QPropertyAnimation.Running:
+        if self.hide_anim_group.state() == QPropertyAnimation.Running:
             self.hide_anim_group.stop()
 
         if not self.rgb_timer.isActive():
@@ -1247,7 +1291,7 @@ class AgentPanel(QWidget):
             return
 
         new_geometry = self.calculate_target_geometry()
-        is_fading_in = hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running
+        is_fading_in = self.show_anim_group.state() == QPropertyAnimation.Running
 
         if is_fading_in and new_geometry != self.target_geometry:
             self.show_anim_group.stop()
@@ -1280,34 +1324,35 @@ class AgentPanel(QWidget):
             self.show()
             self.raise_()
 
-            self.show_anim_group = QParallelAnimationGroup(self)
-
-            fade_in = QPropertyAnimation(self, b"windowOpacity")
-            fade_in.setDuration(MOTION["fade_in_ms"])
-            fade_in.setStartValue(self.windowOpacity())
-            fade_in.setEndValue(1.0)
-            fade_in.setEasingCurve(QEasingCurve.OutCubic)
-            self.show_anim_group.addAnimation(fade_in)
-
-            if not self.is_dragging and not self.is_resizing:
-                geom_anim = QPropertyAnimation(self, b"anim_geometry")
-                geom_anim.setDuration(290)
-                geom_anim.setStartValue(start_geom)
-                geom_anim.setEndValue(new_geometry)
-                geom_anim.setEasingCurve(QEasingCurve.OutQuint)
-                self.show_anim_group.addAnimation(geom_anim)
-
+            self._fade_in_anim.setStartValue(self.windowOpacity())
+            self._fade_in_anim.setEndValue(1.0)
+            self._show_geom_anim.setStartValue(start_geom)
+            self._show_geom_anim.setEndValue(new_geometry)
             self.show_anim_group.start()
         else:
             if self.target_geometry != new_geometry and not is_fading_in:
-                self.target_geometry = new_geometry
-                if self.resize_anim.state() == QPropertyAnimation.Running:
-                    self.resize_anim.stop()
+                curr_geom = self.geometry()
+                if (curr_geom.x() == new_geometry.x()
+                        and curr_geom.y() == new_geometry.y()
+                        and curr_geom.width() == new_geometry.width()
+                        and abs(curr_geom.height() - new_geometry.height()) <= 3):
+                    return
 
-                if self.is_dragging or self.is_resizing or not animate:
+                self.target_geometry = new_geometry
+                anim_running = self.resize_anim.state() == QPropertyAnimation.Running
+
+                if not animate:
+                    if anim_running:
+                        self.resize_anim.stop()
                     self.setGeometry(new_geometry)
+                elif anim_running:
+                    self.resize_anim.pause()
+                    self.resize_anim.setStartValue(curr_geom)
+                    self.resize_anim.setEndValue(new_geometry)
+                    self.resize_anim.setCurrentTime(0)
+                    self.resize_anim.resume()
                 else:
-                    self.resize_anim.setStartValue(self.geometry())
+                    self.resize_anim.setStartValue(curr_geom)
                     self.resize_anim.setEndValue(new_geometry)
                     self.resize_anim.start()
 
@@ -1317,30 +1362,18 @@ class AgentPanel(QWidget):
 
         self.clear_override_cursor()
 
-        if hasattr(self, "show_anim_group") and self.show_anim_group.state() == QPropertyAnimation.Running:
+        if self.show_anim_group.state() == QPropertyAnimation.Running:
             self.show_anim_group.stop()
         if self.resize_anim.state() == QPropertyAnimation.Running:
             self.resize_anim.stop()
 
-        self.hide_anim_group = QParallelAnimationGroup(self)
-
-        fade_out = QPropertyAnimation(self, b"windowOpacity")
-        fade_out.setDuration(MOTION["fade_out_ms"])
-        fade_out.setStartValue(self.windowOpacity())
-        fade_out.setEndValue(0.0)
-        fade_out.setEasingCurve(QEasingCurve.InOutQuad)
-
         curr_geom = self.geometry()
         end_geom = QRect(curr_geom.x(), curr_geom.y() - 20, curr_geom.width(), curr_geom.height())
-        slide_up = QPropertyAnimation(self, b"anim_geometry")
-        slide_up.setDuration(240)
-        slide_up.setStartValue(curr_geom)
-        slide_up.setEndValue(end_geom)
-        slide_up.setEasingCurve(QEasingCurve.InCubic)
 
-        self.hide_anim_group.addAnimation(fade_out)
-        self.hide_anim_group.addAnimation(slide_up)
-        self.hide_anim_group.finished.connect(self._on_hidden_finished)
+        self._fade_out_anim.setStartValue(self.windowOpacity())
+        self._fade_out_anim.setEndValue(0.0)
+        self._hide_geom_anim.setStartValue(curr_geom)
+        self._hide_geom_anim.setEndValue(end_geom)
         self.hide_anim_group.start()
 
     def _on_hidden_finished(self):
@@ -1453,14 +1486,16 @@ class AgentPanel(QWidget):
                 self.show_panel()
             return
 
-        if status == self.last_status:
+        action_detail = _safe_str(status.get("action_detail"))
+        observation = _safe_str(status.get("observation"))
+        status_sig = (step, action, action_detail, observation, tokens, len(thought), thought[-64:] if thought else "")
+
+        if status_sig == self.last_status:
             if self.isVisible() and step == 0:
                 self.hide_timer.start(4000)
             return
 
-        self.last_status = status
-        action_detail = _safe_str(status.get("action_detail"))
-        observation = _safe_str(status.get("observation"))
+        self.last_status = status_sig
 
         is_task_complete = False
         formatted_tokens = self.format_tokens(tokens)
@@ -1472,9 +1507,8 @@ class AgentPanel(QWidget):
             self.current_action_type = "done"
             is_task_complete = True
             self._invalidate_height_cache()
-        else:
-            if not self.rgb_timer.isActive():
-                self.rgb_timer.start(MOTION["rgb_tick_ms"])
+        if not self.rgb_timer.isActive():
+            self.rgb_timer.start(MOTION["rgb_tick_ms"])
 
         if is_task_complete:
             self.phase_label.setText("Done")
@@ -1485,22 +1519,22 @@ class AgentPanel(QWidget):
             base_text, self.current_action_type = self.resolve_action_display(action)
             self.status_tag.setText(base_text)
 
-            clean_detail = str(action_detail or "").strip()
+            clean_detail = action_detail.strip()
             if clean_detail and action != "THINKING":
-                self._raw_detail_text = clean_detail
-                self.set_label_font(self.detail_pill, clean_detail, 8, QFont.Medium)
-                fm = QFontMetrics(self.detail_pill.font())
-                max_detail_w = max(110, self.user_width - 365)
-                elided_detail = fm.elidedText(clean_detail, Qt.ElideRight, max_detail_w)
-                self.detail_pill.setText(elided_detail)
-                self.detail_pill.show()
+                if clean_detail != self._raw_detail_text or not self.detail_pill.isVisible():
+                    self._raw_detail_text = clean_detail
+                    fm = QFontMetrics(self.detail_pill.font())
+                    max_detail_w = max(110, self.user_width - 365)
+                    elided_detail = fm.elidedText(clean_detail, Qt.ElideRight, max_detail_w)
+                    self.detail_pill.setText(elided_detail)
+                    self.detail_pill.show()
             else:
                 self._raw_detail_text = ""
                 self.detail_pill.clear()
                 self.detail_pill.hide()
 
             if self.current_step != step:
-                if step == 1:
+                if step == 1 or self.current_step <= 0:
                     self.thought_viewer.reset_scroll_lock()
                     self._invalidate_height_cache()
                 self.phase_label.setText(f"Step {step:02}")
@@ -1512,7 +1546,6 @@ class AgentPanel(QWidget):
                 clean_obs = clean_obs[:152] + "..."
 
             if self.obs_label.text() != clean_obs or not self.obs_card.isVisible():
-                self.set_label_font(self.obs_label, clean_obs, 9, QFont.Normal)
                 self.obs_label.setText(clean_obs)
                 self.obs_card.set_accent(self.current_rgb)
                 self.separator.hide()
@@ -1523,11 +1556,7 @@ class AgentPanel(QWidget):
                 self.separator.hide()
                 self.obs_card.hide()
 
-        if thought:
-            clean_thought = self._trim_thought_safely(thought.strip())
-            self.schedule_thought_render(clean_thought)
-        else:
-            self.schedule_thought_render("")
+        self.schedule_thought_render(thought if thought else "")
 
         if not self.isVisible():
             self.show_panel()
@@ -1537,8 +1566,6 @@ class AgentPanel(QWidget):
                 self.thought_render_timer.stop()
             if self._pending_thought_text is not None:
                 self.flush_pending_thought()
-            else:
-                self._pending_thought_text = None
             self.hide_timer.start(4000)
         else:
             self.hide_timer.stop()

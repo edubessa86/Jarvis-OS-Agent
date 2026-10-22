@@ -1,9 +1,9 @@
 import math
 
-from PyQt5.QtCore import Qt, QPointF, QRectF, QSize
+from PyQt5.QtCore import Qt, QPointF, QRect, QRectF, QSize
 from PyQt5.QtWidgets import QFrame
 from PyQt5.QtGui import (
-    QPainter, QLinearGradient, QRadialGradient, QPen, QColor, QPixmap
+    QPainter, QLinearGradient, QRadialGradient, QPen, QColor, QPixmap, QRegion
 )
 
 
@@ -16,58 +16,70 @@ class IslandContainer(QFrame):
         self._static_pixmap = None
         self._static_size = None
         self._static_bucket = None
+        self._static_dpr = 1.0
+        self._interactive_resizing = False
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMinimumSize(0, 0)
 
     def minimumSizeHint(self):
         return QSize(0, 0)
 
+    def set_interactive_resizing(self, active: bool):
+        if self._interactive_resizing != active:
+            self._interactive_resizing = active
+            if not active:
+                self._static_pixmap = None
+                self.update()
+
     def update_visuals(self, rgb, phase):
-        self.rgb = rgb
+        new_rgb = [max(0, min(255, int(c))) for c in rgb]
+        bucket_changed = (tuple(int(c / 16) * 16 for c in new_rgb) != self._static_bucket)
+        self.rgb = new_rgb
         self.phase = phase
-        self.update()
+
+        if bucket_changed or self._static_size != self.size() or self._interactive_resizing:
+            self.update()
+            return
+
+        w, h = self.width(), self.height()
+        if w > 64 and h > 48:
+            il, it, ir, ib = self.island_grip_margins()
+            inner_exclude = QRect(
+                il + 20,
+                it + 16,
+                max(1, w - (il + ir + 40)),
+                max(1, h - (it + ib + 32)),
+            )
+            border_region = QRegion(self.rect()) - QRegion(inner_exclude)
+            self.update(border_region)
+        else:
+            self.update()
 
     def _rgb_bucket(self):
         return tuple(int(c / 16) * 16 for c in self.rgb)
 
     @classmethod
     def island_grip_margins(cls):
-        """Margins from widget outer rect to island visual rect: (left, top, right, bottom)."""
         return (9, 7, 9, 11)
 
-    def _ensure_static(self):
-        current_size = self.size()
-        if current_size.width() <= 0 or current_size.height() <= 0:
-            return False
-        current_bucket = self._rgb_bucket()
-        if (
-            self._static_pixmap is not None
-            and self._static_size == current_size
-            and self._static_bucket == current_bucket
-        ):
-            return True
-        self._static_pixmap = self._render_static(current_size, current_bucket)
-        self._static_size = current_size
-        self._static_bucket = current_bucket
-        return True
-
-    def _render_static(self, size, bucket):
-        pixmap = QPixmap(size)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
+    def _draw_static_layers(self, painter, size, bucket, fast_mode=False):
         rect = QRectF(0, 0, size.width(), size.height())
         il, it, ir, ib = self.island_grip_margins()
         island_rect = rect.adjusted(float(il), float(it), -float(ir), -float(ib))
         radius = self.corner_radius
         r, g, b = bucket
 
-        for offset, alpha in [(6, 10), (4, 16), (2, 24), (1, 32)]:
-            shadow_rect = island_rect.adjusted(2.0, float(offset), -2.0, float(offset + 2))
+        if fast_mode:
+            shadow_rect = island_rect.adjusted(2.0, 3.0, -2.0, 5.0)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(0, 0, 0, alpha))
+            painter.setBrush(QColor(0, 0, 0, 42))
             painter.drawRoundedRect(shadow_rect, radius, radius)
+        else:
+            for offset, alpha in [(6, 10), (4, 16), (2, 24), (1, 32)]:
+                shadow_rect = island_rect.adjusted(2.0, float(offset), -2.0, float(offset + 2))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(0, 0, 0, alpha))
+                painter.drawRoundedRect(shadow_rect, radius, radius)
 
         bg_grad = QLinearGradient(island_rect.topLeft(), island_rect.bottomLeft())
         bg_grad.setColorAt(0.0, QColor(30, 31, 38, 248))
@@ -89,7 +101,7 @@ class IslandContainer(QFrame):
         shine_rect = QRectF(
             island_rect.left() + 16.0,
             island_rect.top() + 1.2,
-            island_rect.width() - 32.0,
+            max(0.0, island_rect.width() - 32.0),
             1.0,
         )
         shine_grad = QLinearGradient(shine_rect.topLeft(), shine_rect.topRight())
@@ -100,16 +112,53 @@ class IslandContainer(QFrame):
         painter.setBrush(shine_grad)
         painter.drawRect(shine_rect)
 
+    def _ensure_static(self):
+        current_size = self.size()
+        if current_size.width() <= 0 or current_size.height() <= 0:
+            return False
+        current_bucket = self._rgb_bucket()
+        dpr = self.devicePixelRatioF()
+        if (
+            self._static_pixmap is not None
+            and self._static_size == current_size
+            and self._static_bucket == current_bucket
+            and self._static_dpr == dpr
+        ):
+            return True
+        self._static_pixmap = self._render_static(current_size, current_bucket, dpr)
+        self._static_size = current_size
+        self._static_bucket = current_bucket
+        self._static_dpr = dpr
+        return True
+
+    def _render_static(self, size, bucket, dpr):
+        px_w = max(1, int(round(size.width() * dpr)))
+        px_h = max(1, int(round(size.height() * dpr)))
+        pixmap = QPixmap(px_w, px_h)
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        self._draw_static_layers(painter, size, bucket, fast_mode=False)
         painter.end()
         return pixmap
 
     def paintEvent(self, event):
-        if not self._ensure_static():
+        current_size = self.size()
+        if current_size.width() <= 0 or current_size.height() <= 0:
             return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setClipRegion(event.region())
 
-        painter.drawPixmap(0, 0, self._static_pixmap)
+        if self._interactive_resizing:
+            self._draw_static_layers(painter, current_size, self._rgb_bucket(), fast_mode=True)
+        else:
+            if not self._ensure_static():
+                painter.end()
+                return
+            painter.drawPixmap(0, 0, self._static_pixmap)
 
         rect = QRectF(self.rect())
         il, it, ir, ib = self.island_grip_margins()
