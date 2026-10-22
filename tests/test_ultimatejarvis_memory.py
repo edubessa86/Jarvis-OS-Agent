@@ -11,10 +11,11 @@ class LocalMemoryTests(unittest.TestCase):
             item = memory.remember(
                 "Football training on Wednesday",
                 category="routine",
-                tags=["sports", "weekly"],
+                tags=["sports", "weekly", "machine learning"],
             )
             self.assertEqual(item["category"], "routine")
             self.assertIn("sports", item["tags"])
+            self.assertIn("machine learning", item["tags"])
             found = memory.search("Football")
             self.assertEqual(len(found), 1)
             self.assertEqual(found[0]["memory_id"], item["memory_id"])
