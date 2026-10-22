@@ -78,3 +78,15 @@ py -3 -m ultimatejarvis inspect --workspace "$env:USERPROFILE\UltimateJarvisWork
 ```
 
 The workspace is created if missing. File listing and reading reject paths outside it; text reads are size-limited by the `Workspace` component. The tools do not launch applications, run shell commands, modify files, or access arbitrary host paths. These are application-level checks, not a substitute for OS sandboxing.
+
+
+## Validated plan preview (no execution)
+
+With Ollama running and a small model installed, ask UltimateJarvis to propose a sequence of approved read-only tool calls:
+
+~~~powershell
+ollama pull qwen2.5:3b
+py -3 -m ultimatejarvis plan --workspace "$env:USERPROFILE\\UltimateJarvisWorkspace" "Leia o arquivo notes.txt e me diga o assunto principal"
+~~~
+
+The planner requests strict JSON and validates every step against the registered tool allowlist, argument schema, and risk classification. It rejects unknown tools, extra arguments, malformed output, markdown-wrapped JSON, and plans longer than five steps. **This command only displays a plan**; it does not invoke tools, read files, execute commands, or claim completion. Model output is untrusted and never grants permissions.
