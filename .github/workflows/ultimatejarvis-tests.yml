@@ -1,0 +1,27 @@
+name: UltimateJarvis Foundation Tests
+
+on:
+  push:
+    branches:
+      - feature/ultimatejarvis-foundation
+  pull_request:
+    paths:
+      - "ultimatejarvis/**"
+      - "tests/test_ultimatejarvis_*.py"
+      - ".github/workflows/ultimatejarvis-tests.yml"
+      - "docs/ULTIMATEJARVIS_ARCHITECTURE.md"
+      - "ULTIMATEJARVIS_FIRST_INCREMENT.md"
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run standard-library tests
+        run: python -m unittest discover -s tests -p "test_ultimatejarvis_*.py" -v
