@@ -57,3 +57,24 @@ py -3 -m ultimatejarvis tasks transition demo-001 succeeded "Completed by an ext
 ```
 
 The task database defaults to the current user's application-data directory as `tasks.sqlite3`. Supply `--db PATH` immediately after `tasks` and before the subcommand to use a separate database. The CLI records state only: it does **not** run tasks, commands, scripts, or tools. Invalid state transitions are rejected. Prompts and event messages are stored as plaintext; do not include secrets.
+
+
+## Read-only Windows inspection tools
+
+The first inspection tools are intentionally read-only and limited to basic system facts and a configured workspace:
+
+```powershell
+# Show the registered tools and their fixed risk levels
+py -3 -m ultimatejarvis inspect --workspace "$env:USERPROFILE\UltimateJarvisWorkspace" tools
+
+# Read OS/Python/CPU/RAM diagnostics
+py -3 -m ultimatejarvis inspect --workspace "$env:USERPROFILE\UltimateJarvisWorkspace" system
+
+# List files within the workspace only
+py -3 -m ultimatejarvis inspect --workspace "$env:USERPROFILE\UltimateJarvisWorkspace" list-files
+
+# Read one UTF-8 text file within that workspace
+py -3 -m ultimatejarvis inspect --workspace "$env:USERPROFILE\UltimateJarvisWorkspace" read-text notes.txt
+```
+
+The workspace is created if missing. File listing and reading reject paths outside it; text reads are size-limited by the `Workspace` component. The tools do not launch applications, run shell commands, modify files, or access arbitrary host paths. These are application-level checks, not a substitute for OS sandboxing.
