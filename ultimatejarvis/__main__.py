@@ -93,11 +93,31 @@ def main() -> int:
     run_parser.add_argument("--audit-db", type=Path, default=_default_data_dir() / "tool-audit.sqlite3")
     run_parser.add_argument("goal")
 
+    sandbox_parser = subparsers.add_parser(
+        "sandbox-qualify", help="Run a fixed Windows Sandbox isolation smoke test (no arbitrary code)"
+    )
+    sandbox_parser.add_argument("--timeout-seconds", type=int, default=45)
+    sandbox_parser.add_argument("--memory-limit-mb", type=int, default=2048)
+
     audit_parser = subparsers.add_parser("audit", help="Review recent local tool execution audit events")
     audit_parser.add_argument("--db", type=Path, default=_default_data_dir() / "tool-audit.sqlite3")
     audit_parser.add_argument("--limit", type=int, default=50)
 
     args = parser.parse_args()
+
+    if args.command == "sandbox-qualify":
+        from .sandbox_qualification import SandboxQualificationError, run_sandbox_qualification
+        try:
+            result = run_sandbox_qualification(
+                timeout_seconds=args.timeout_seconds, memory_limit_mb=args.memory_limit_mb
+            )
+        except (SandboxQualificationError, ValueError) as exc:
+            print(json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)},
+                             ensure_ascii=False, indent=2))
+            return 1
+        print(json.dumps({"ok": bool(result.get("all_probes_passed")), "result": result},
+                         ensure_ascii=False, indent=2))
+        return 0 if result.get("all_probes_passed") else 1
 
     if args.command == "run":
         from .audit import SQLiteToolAuditLog

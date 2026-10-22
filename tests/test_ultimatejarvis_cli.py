@@ -8,9 +8,32 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ultimatejarvis.__main__ import main
+from ultimatejarvis.sandbox_qualification import SandboxQualificationError
 
 
 class CliTests(unittest.TestCase):
+    def test_sandbox_qualification_cli_reports_unavailable_host(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["ultimatejarvis", "sandbox-qualify"]):
+            with patch("ultimatejarvis.sandbox_qualification.run_sandbox_qualification",
+                       side_effect=SandboxQualificationError("Windows Sandbox unavailable")):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(), 1)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["error"], "SandboxQualificationError")
+
+    def test_sandbox_qualification_cli_returns_success_for_passing_smoke_test(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["ultimatejarvis", "sandbox-qualify"]):
+            with patch("ultimatejarvis.sandbox_qualification.run_sandbox_qualification",
+                       return_value={"all_probes_passed": True, "isolation_attestation": False}):
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+        report = json.loads(output.getvalue())
+        self.assertTrue(report["ok"])
+        self.assertFalse(report["result"]["isolation_attestation"])
+
     def test_memory_add_and_search_commands(self):
         with tempfile.TemporaryDirectory() as temp:
             db = str(Path(temp) / "memory.sqlite3")

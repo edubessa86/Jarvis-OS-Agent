@@ -72,3 +72,52 @@ def build_wsb_xml(config: WindowsSandboxConfig) -> str:
     return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(
         root, encoding="unicode"
     ) + "\n"
+
+def build_qualification_wsb_xml(
+    workspace: Path,
+    control_dir: Path,
+    output_dir: Path,
+    *,
+    memory_limit_mb: int = 2048,
+) -> str:
+    """Build a disposable qualification VM config; never maps arbitrary user code."""
+    if not 2048 <= memory_limit_mb <= 16384:
+        raise ValueError("memory_limit_mb must be between 2048 and 16384.")
+    paths = [Path(workspace), Path(control_dir), Path(output_dir)]
+    for path in paths:
+        if not path.is_absolute() or not path.is_dir():
+            raise ValueError("All mapped folders must be absolute existing directories.")
+    resolved = [path.resolve() for path in paths]
+    if len(set(resolved)) != len(resolved):
+        raise ValueError("Mapped folders must be distinct.")
+    root = ET.Element("Configuration")
+    for name, value in (
+        ("VGpu", "Disable"),
+        ("Networking", "Disable"),
+        ("ClipboardRedirection", "Disable"),
+        ("PrinterRedirection", "Disable"),
+        ("AudioInput", "Disable"),
+        ("VideoInput", "Disable"),
+        ("MemoryInMB", str(memory_limit_mb)),
+    ):
+        ET.SubElement(root, name).text = value
+    folders = ET.SubElement(root, "MappedFolders")
+    for host, guest, read_only in (
+        (resolved[0], r"C:\UltimateJarvis\workspace", True),
+        (resolved[1], r"C:\UltimateJarvis\control", True),
+        (resolved[2], r"C:\UltimateJarvis\output", False),
+    ):
+        mapped = ET.SubElement(folders, "MappedFolder")
+        ET.SubElement(mapped, "HostFolder").text = str(host)
+        ET.SubElement(mapped, "SandboxFolder").text = guest
+        ET.SubElement(mapped, "ReadOnly").text = "true" if read_only else "false"
+    logon = ET.SubElement(root, "LogonCommand")
+    ET.SubElement(logon, "Command").text = (
+        r"powershell.exe -NoLogo -NoProfile -NonInteractive "
+        r"-ExecutionPolicy Bypass -File C:\UltimateJarvis\control\qualify.ps1"
+    )
+    ET.indent(root, space="  ")
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(
+        root, encoding="unicode"
+    ) + "\n"
+
