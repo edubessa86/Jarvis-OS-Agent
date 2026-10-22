@@ -41,3 +41,19 @@ py -3 -m ultimatejarvis memory delete ID_DA_MEMORIA
 ```
 
 Memory is plaintext in SQLite and remains on the machine. Do not store passwords, API keys or other secrets.
+
+
+## Persistent task history (metadata only; no execution)
+
+Create a task record, inspect it, and append allowed lifecycle transitions:
+
+```powershell
+py -3 -m ultimatejarvis tasks create demo-001 "Organize files in my approved workspace"
+py -3 -m ultimatejarvis tasks list
+py -3 -m ultimatejarvis tasks show demo-001
+py -3 -m ultimatejarvis tasks transition demo-001 planning "Plan prepared"
+py -3 -m ultimatejarvis tasks transition demo-001 running "Ready to start a future approved runner"
+py -3 -m ultimatejarvis tasks transition demo-001 succeeded "Completed by an external/manual process"
+```
+
+The task database defaults to the current user's application-data directory as `tasks.sqlite3`. Supply `--db PATH` immediately after `tasks` and before the subcommand to use a separate database. The CLI records state only: it does **not** run tasks, commands, scripts, or tools. Invalid state transitions are rejected. Prompts and event messages are stored as plaintext; do not include secrets.
