@@ -70,6 +70,18 @@ def main() -> int:
     task_transition.add_argument("message")
     task_transition.add_argument("--error", help="Optional error detail, stored only when state is failed")
 
+    inspect_parser = subparsers.add_parser("inspect", help="Run approved read-only inspection tools")
+    inspect_parser.add_argument("--workspace", type=Path,
+                                default=Path.home() / "UltimateJarvisWorkspace",
+                                help="Workspace root for workspace-only tools")
+    inspect_sub = inspect_parser.add_subparsers(dest="inspect_command", required=True)
+    inspect_sub.add_parser("tools", help="List available read-only tools")
+    inspect_system = inspect_sub.add_parser("system", help="Read basic system diagnostics")
+    inspect_list = inspect_sub.add_parser("list-files", help="List files within the configured workspace")
+    inspect_list.add_argument("--dir", default=".", help="Relative directory within the workspace")
+    inspect_read = inspect_sub.add_parser("read-text", help="Read a UTF-8 text file in the workspace")
+    inspect_read.add_argument("path", help="Relative file path within the workspace")
+
     args = parser.parse_args()
 
     if args.command == "diagnostics":
@@ -115,6 +127,27 @@ def main() -> int:
                 deleted = memory.delete(args.memory_id)
                 print(json.dumps({"deleted": deleted, "memory_id": args.memory_id}, ensure_ascii=False))
                 return 0 if deleted else 1
+        return 0
+
+    if args.command == "inspect":
+        from .windows_tools import build_read_only_registry
+
+        registry = build_read_only_registry(args.workspace)
+        if args.inspect_command == "tools":
+            result = registry.describe()
+        elif args.inspect_command == "system":
+            result = registry.invoke("system.diagnostics", {}).value
+        elif args.inspect_command == "list-files":
+            result = registry.invoke("workspace.list_files", {"relative_dir": args.dir}).value
+        elif args.inspect_command == "read-text":
+            tool_result = registry.invoke("workspace.read_text", {"relative_path": args.path})
+            if tool_result.decision.value != "allow":
+                print(json.dumps({"error": tool_result.reason}, ensure_ascii=False, indent=2))
+                return 1
+            result = tool_result.value
+        else:
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "tasks":
