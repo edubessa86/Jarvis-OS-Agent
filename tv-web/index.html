@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#080b12">
+  <title>UltimateJarvis TV</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">J</div>
+        <div><p class="eyebrow">ULTIMATE</p><h1>JARVIS</h1></div>
+      </div>
+      <div class="connection"><span class="status-dot"></span><span id="core-status">Núcleo desconectado · demonstração</span></div>
+    </header>
+
+    <section class="hero" aria-labelledby="greeting">
+      <div class="orb-wrap" aria-hidden="true">
+        <div class="orb-ring ring-one"></div><div class="orb-ring ring-two"></div>
+        <div class="orb"><span>J</span></div>
+        <div class="orb-glow"></div>
+      </div>
+      <p class="eyebrow accent">ASSISTENTE PESSOAL</p>
+      <h2 id="greeting">À sua disposição.</h2>
+      <p class="subtitle" id="status-message">Modo demonstração. A ativação por voz ainda precisa ser validada neste navegador.</p>
+      <div class="voice-state" id="voice-state" role="status" aria-live="polite">
+        <span class="voice-dot"></span><span id="voice-state-text">Microfone inativo</span>
+      </div>
+      <div class="actions">
+        <button class="primary" id="voice-button" type="button">Testar voz e ativação “Jarvis”</button>
+        <button class="secondary" id="stop-button" type="button" disabled>Parar escuta</button>
+      </div>
+      <p class="privacy-note">A voz não é ativada automaticamente. O teste depende do suporte do navegador e pode usar serviços de reconhecimento externos.</p>
+    </section>
+
+    <section class="conversation" aria-labelledby="conversation-title">
+      <div class="section-heading"><span class="eyebrow">CONSOLE</span><h3 id="conversation-title">Última interação</h3></div>
+      <div class="message" id="assistant-message">
+        <span class="message-icon" aria-hidden="true">J</span>
+        <div><p class="message-label">ULTIMATEJARVIS</p><p id="message-text">Olá. Estou pronto para iniciar o teste de compatibilidade de voz.</p></div>
+      </div>
+      <form id="command-form" class="command-form">
+        <label class="sr-only" for="command-input">Digite um comando de teste</label>
+        <input id="command-input" type="text" autocomplete="off" placeholder="Digite um comando de demonstração…" maxlength="300">
+        <button type="submit" class="send-button" aria-label="Enviar comando de demonstração">Enviar <span aria-hidden="true">↗</span></button>
+      </form>
+      <p class="demo-warning">Demonstração local: nenhum comando é enviado a uma IA e nenhuma ação externa é executada.</p>
+    </section>
+
+    <footer><span>ULTIMATEJARVIS · TV WEB PROTOTYPE</span><span>Samsung Tizen · etapa de compatibilidade</span></footer>
+  </main>
+  <script src="./app.js" defer></script>
+</body>
+</html>
