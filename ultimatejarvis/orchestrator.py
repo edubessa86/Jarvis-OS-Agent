@@ -145,6 +145,20 @@ class ToolRegistry:
             for spec in sorted(self._tools.values(), key=lambda item: item.name)
         ]
 
+    def validate_call(self, name: str, arguments: Mapping[str, Any]) -> tuple[bool, str, Risk | None]:
+        """Validate a proposed tool call without executing its handler."""
+        spec = self._tools.get(name)
+        if spec is None:
+            return False, "Unknown tool; not in the allowlist.", None
+        if not isinstance(arguments, Mapping):
+            return False, "Arguments must be a mapping.", spec.risk
+        keys = set(arguments)
+        if not spec.required_arguments.issubset(keys):
+            return False, "Required arguments are missing.", spec.risk
+        if not keys.issubset(spec.allowed_arguments):
+            return False, "Unexpected arguments are not allowed.", spec.risk
+        return True, "Tool and arguments are valid; handler was not called.", spec.risk
+
     def invoke(
         self,
         name: str,
@@ -154,15 +168,9 @@ class ToolRegistry:
         approved: bool = False,
     ) -> ToolResult:
         spec = self._tools.get(name)
-        if spec is None:
-            return ToolResult(Decision.DENY, reason="Unknown tool; not in the allowlist.")
-        if not isinstance(arguments, Mapping):
-            return ToolResult(Decision.DENY, reason="Arguments must be a mapping.")
-        keys = set(arguments)
-        if not spec.required_arguments.issubset(keys):
-            return ToolResult(Decision.DENY, reason="Required arguments are missing.")
-        if not keys.issubset(spec.allowed_arguments):
-            return ToolResult(Decision.DENY, reason="Unexpected arguments are not allowed.")
+        valid, reason, _risk = self.validate_call(name, arguments)
+        if not valid or spec is None:
+            return ToolResult(Decision.DENY, reason=reason)
 
         result = authorize(ToolRequest(
             tool_name=spec.name,
