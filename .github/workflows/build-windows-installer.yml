@@ -1,0 +1,39 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - feature/windows-installer-exe
+    paths:
+      - "installer/**"
+      - ".github/workflows/build-windows-installer.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $compiler = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) { $compiler = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & $compiler installer\Jarvis-OS-Agent.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-OS-Agent-Setup-Windows
+          path: dist/Jarvis-OS-Agent-Setup.exe
+          if-no-files-found: error
+          retention-days: 30
