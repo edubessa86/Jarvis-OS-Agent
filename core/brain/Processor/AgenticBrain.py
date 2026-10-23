@@ -174,22 +174,45 @@ def run_agentic_loop(
     logger.info(
         f"🤖 AGENTIC LOOP INITIATED (Provider: {AGENT_PRIMARY_PROVIDER} | Fallback: {AGENT_FALLBACK_PROVIDER})..."
     )
-    try:
-        primary_provider = get_provider(AGENT_PRIMARY_PROVIDER)
-        fallback_provider = get_provider(AGENT_FALLBACK_PROVIDER)
-        current_provider = primary_provider
-        logger.info(f"✅ Primary provider loaded: {AGENT_PRIMARY_PROVIDER}")
-    except Exception as e:
-        logger.error(f"❌ Failed to initialize primary provider: {e}")
+    provider_order = [
+        AGENT_PRIMARY_PROVIDER,
+        AGENT_FALLBACK_PROVIDER,
+        "groq",
+        "openrouter",
+        "regolo",
+        "gemini",
+    ]
+    if os.getenv("CUSTOM_BASE_URL") or os.getenv("CUSTOM_API_KEY"):
+        provider_order.append("custom")
+
+    provider_candidates = []
+    seen_provider_names = set()
+
+    for provider_name in provider_order:
+        normalized_name = (provider_name or "").strip().lower()
+        if not normalized_name or normalized_name in seen_provider_names:
+            continue
+        seen_provider_names.add(normalized_name)
         try:
-            current_provider = get_provider(AGENT_FALLBACK_PROVIDER)
-            logger.info(f"🔄 Using fallback provider: {AGENT_FALLBACK_PROVIDER}")
-        except Exception as e2:
-            logger.error(f"❌ All providers failed to initialize: {e2}")
-            msg = "Bhai, AI provider start nahi ho pa raha. Check API keys."
-            send_telegram_update(final_response=msg)
-            clear_telegram_context()
-            return make_result(msg, priority="high")
+            provider_instance = get_provider(normalized_name)
+            provider_candidates.append((normalized_name, provider_instance))
+            logger.info(f"✅ Provider available for fallback: {normalized_name}")
+        except Exception as provider_init_error:
+            logger.warning(
+                f"⚠️ Provider unavailable during initialization: "
+                f"{normalized_name} ({provider_init_error})"
+            )
+
+    if not provider_candidates:
+        logger.error("❌ No configured AI providers could be initialized.")
+        msg = "Bhai, AI provider start nahi ho pa raha. Check API keys and provider settings."
+        send_telegram_update(final_response=msg)
+        clear_telegram_context()
+        return make_result(msg, priority="high")
+
+    current_provider_index = 0
+    current_provider_name, current_provider = provider_candidates[current_provider_index]
+    logger.info(f"✅ Starting with provider: {current_provider_name}")
 
     recent_context_xml = (
         memory_instance.get_agentic_fast_context()
@@ -365,8 +388,7 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
                 )
 
             ai_response = {}
-            max_api_retries = 10
-            provider_switched = False
+            max_api_retries = len(provider_candidates)
             for attempt in range(max_api_retries):
                 try:
                     panic_step = max_steps - 2
@@ -583,39 +605,21 @@ Use plain text like [SUCCESS], [ERROR], [DONE], [OK], [FAIL], [V], [X] instead.
 
                 except Exception as api_err:
                     error_msg = str(api_err)
-                    is_quota_error = (
-                        "429" in error_msg
-                        or "RESOURCE_EXHAUSTED" in error_msg
-                        or "quota" in error_msg.lower()
+                    if current_provider_index + 1 < len(provider_candidates):
+                        previous_provider_name = current_provider_name
+                        current_provider_index += 1
+                        current_provider_name, current_provider = provider_candidates[current_provider_index]
+                        logger.warning(
+                            f"⚠️ Provider {previous_provider_name} failed: {error_msg}. "
+                            f"Switching to {current_provider_name} "
+                            f"({current_provider_index + 1}/{len(provider_candidates)})."
+                        )
+                        continue
+
+                    logger.error(
+                        f"❌ All initialized providers failed. Last error: {error_msg}"
                     )
-
-                    if is_quota_error and not provider_switched:
-                        logger.warning(
-                            f"⚠️ Provider {current_provider.__class__.__name__} hit quota/rate limit. Switching to fallback..."
-                        )
-                        try:
-                            current_provider = fallback_provider
-                            provider_switched = True
-                            logger.info(
-                                f"🔄 Switched to fallback provider: {AGENT_FALLBACK_PROVIDER}"
-                            )
-                            continue
-                        except Exception as switch_err:
-                            logger.error(
-                                f"❌ Failed to switch to fallback: {switch_err}"
-                            )
-                            raise api_err
-
-                    elif attempt < max_api_retries - 1:
-                        logger.warning(
-                            f"⚠️ API Generation failed (Attempt {attempt + 1}/{max_api_retries}): {api_err}. Retrying in 2 seconds..."
-                        )
-                        time.sleep(2)
-                    else:
-                        logger.error(
-                            f"❌ API failed completely after {max_api_retries} attempts."
-                        )
-                        raise api_err
+                    raise api_err
 
             logger.info(
                 f"🧠 Agent Thought: {ai_response.get('thought', 'Thinking...')}"
