@@ -19,17 +19,44 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Install Inno Setup
-        run: choco install innosetup --yes --no-progress
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed" }
+
       - name: Compile installer
         shell: pwsh
         run: |
-          $compiler = "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $compiler)) { $compiler = "$env:ProgramFiles\Inno Setup 6\ISCC.exe" }
-          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found" }
+          $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $candidates = @(
+            (Join-Path $programFilesX86 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ChocolateyInstall 'lib\innosetup\tools\ISCC.exe')
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          $compiler = $candidates | Select-Object -First 1
+
+          if (-not $compiler) {
+            Write-Host "Inno Setup locations checked:"
+            Write-Host "ProgramFiles(x86)=$programFilesX86"
+            Write-Host "ProgramFiles=$env:ProgramFiles"
+            Write-Host "ChocolateyInstall=$env:ChocolateyInstall"
+            Get-ChildItem -Path $env:ProgramFiles, $programFilesX86 -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName
+            throw "Inno Setup compiler not found after installation"
+          }
+
+          Write-Host "Using Inno Setup compiler: $compiler"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          & $compiler installer\Jarvis-OS-Agent.iss
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+          & $compiler /Qp installer\Jarvis-OS-Agent.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed (exit code $LASTEXITCODE)" }
+
+          if (-not (Test-Path 'dist\Jarvis-OS-Agent-Setup.exe')) {
+            throw "Compilation finished but dist\Jarvis-OS-Agent-Setup.exe was not created"
+          }
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
